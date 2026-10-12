@@ -3,15 +3,20 @@ import argparse
 import torch
 
 from .model import LanguageModel, ModelConfig
-from .tokenizer import ByteTokenizer
+from .tokenizer import BPETokenizer
 from .train import choose_device
 
 
 def load_model(path, device="cpu"):
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    if "tokenizer" not in checkpoint:
+        raise ValueError("Checkpoint has no BPE tokenizer. Retrain with python -m llm.train.")
+    tokenizer = BPETokenizer.from_json(checkpoint["tokenizer"])
     model = LanguageModel(ModelConfig(**checkpoint["config"]))
+    if model.config.vocab_size != tokenizer.vocab_size:
+        raise ValueError("Checkpoint model and tokenizer vocabulary sizes do not match")
     model.load_state_dict(checkpoint["model"])
-    return model.to(device).eval()
+    return model.to(device).eval(), tokenizer
 
 
 def main():
@@ -28,8 +33,7 @@ def main():
         parser.error("prompt must be nonempty")
     torch.manual_seed(args.seed)
     device = choose_device() if args.device == "auto" else args.device
-    tokenizer = ByteTokenizer()
-    model = load_model(args.checkpoint, device)
+    model, tokenizer = load_model(args.checkpoint, device)
     prompt = torch.tensor([tokenizer.encode(args.prompt)], dtype=torch.long, device=device)
     result = model.generate(prompt, args.tokens, args.temperature, args.top_k)
     print(tokenizer.decode(result[0].tolist()))

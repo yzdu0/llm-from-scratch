@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 
 from .model import LanguageModel, ModelConfig
-from .tokenizer import ByteTokenizer
+from .tokenizer import BPETokenizer
 
 
 def choose_device():
@@ -14,14 +14,23 @@ def choose_device():
     return "mps" if torch.backends.mps.is_available() else "cpu"
 
 
-def load_data(path, context_size):
-    text = Path(path).read_text(encoding="utf-8")
-    tokens = torch.tensor(ByteTokenizer().encode(text), dtype=torch.long)
-    split = int(0.9 * len(tokens))
-    train, validation = tokens[:split], tokens[split:]
+def load_data(path, context_size, vocab_size=2048):
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Corpus not found: {path}. Run python -m llm.prepare first.")
+    text = path.read_text(encoding="utf-8")
+    # Split before learning merges, so the tokenizer never trains on validation text.
+    split = text.rfind("\n", 0, int(0.9 * len(text)))
+    if split <= 0:
+        split = int(0.9 * len(text))
+    else:
+        split += 1
+    tokenizer = BPETokenizer.train(text[:split], vocab_size)
+    train, validation = [torch.tensor(tokenizer.encode(part), dtype=torch.long)
+                         for part in (text[:split], text[split:])]
     if min(len(train), len(validation)) <= context_size:
-        raise ValueError("Corpus needs enough bytes for a context plus target in both 90/10 splits")
-    return train, validation
+        raise ValueError("Corpus needs enough tokens for a context plus target in both 90/10 splits")
+    return train, validation, tokenizer
 
 
 def get_batch(data, batch_size, context_size, device, generator=None):
@@ -50,10 +59,11 @@ def evaluate(model, splits, batch_size, device, batches=10):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train a byte-level GPT from random weights")
-    parser.add_argument("--data", default="data/sample.txt")
+    parser = argparse.ArgumentParser(description="Train a BPE-tokenized GPT from random weights")
+    parser.add_argument("--data", default="data/shakespeare.txt")
+    parser.add_argument("--vocab-size", type=int, default=8196)
     parser.add_argument("--out", default="checkpoints/model.pt")
-    parser.add_argument("--steps", type=int, default=1000)
+    parser.add_argument("--steps", type=int, default=10000)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--context-size", type=int, default=128)
     parser.add_argument("--n-layers", type=int, default=4)
@@ -70,12 +80,16 @@ def main():
         parser.error("steps, batch-size, eval-every, eval-batches, and lr must be positive")
     torch.manual_seed(args.seed)
     device = choose_device() if args.device == "auto" else args.device
-    config = ModelConfig(context_size=args.context_size, n_layers=args.n_layers,
+    print("Training BPE tokenizer and encoding corpus...", flush=True)
+    train, validation, tokenizer = load_data(args.data, args.context_size, args.vocab_size)
+    config = ModelConfig(vocab_size=tokenizer.vocab_size,
+                         context_size=args.context_size, n_layers=args.n_layers,
                          n_heads=args.n_heads, n_embd=args.n_embd, dropout=args.dropout)
-    train, validation = load_data(args.data, config.context_size)
     model = LanguageModel(config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     print(f"device={device} parameters={sum(p.numel() for p in model.parameters()):,}", flush=True)
+    print(f"vocabulary={tokenizer.vocab_size:,} train_tokens={len(train):,} "
+          f"validation_tokens={len(validation):,}", flush=True)
     for step in range(args.steps + 1):
         if step % args.eval_every == 0 or step == args.steps:
             losses = evaluate(model, {"train": train, "validation": validation},
@@ -93,7 +107,8 @@ def main():
     output = Path(args.out)
     output.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"config": asdict(config), "model": model.cpu().state_dict(),
-                "step": args.steps}, output)
+                "step": args.steps, "tokenizer": tokenizer.to_json()}, output)
+    output.with_suffix(".tokenizer.json").write_text(tokenizer.to_json(), encoding="utf-8")
     print(f"Saved {output}")
 
 
