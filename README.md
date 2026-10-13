@@ -31,7 +31,7 @@ Training automatically selects CUDA, Apple MPS, or CPU. Override with
 A quick small run:
 
 ```sh
-python -m llm.train --steps 100 --context-size 32 --n-layers 2 --n-embd 64 --batch-size 8 --eval-every 50
+python -m llm.train --steps 10000 --context-size 32 --n-layers 4 --n-embd 128 --batch-size 8 --eval-every 50
 python -m llm.generate --prompt "ROMEO:" --tokens 100
 ```
 

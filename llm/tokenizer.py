@@ -8,7 +8,7 @@ class BPETokenizer:
         self.tokenizer = tokenizer
 
     @classmethod
-    def train(cls, text: str, vocab_size: int = 8196):
+    def train(cls, text: str, vocab_size: int = 8192):
         if not text or vocab_size < 256:
             raise ValueError("BPE training needs nonempty text and vocab_size >= 256")
         tokenizer = Tokenizer(models.BPE())
