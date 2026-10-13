@@ -1,4 +1,5 @@
 import argparse
+from dataclasses import fields
 
 import torch
 
@@ -16,10 +17,14 @@ def load_model(path, device="cpu"):
     # Checkpoints predating these fields used learned positions and GELU.
     config.setdefault("position_encoding", "learned")
     config.setdefault("feed_forward", "gelu")
-    model = LanguageModel(ModelConfig(**config))
+    supported = {field.name for field in fields(ModelConfig)}
+    model = LanguageModel(ModelConfig(**{key: value for key, value in config.items() if key in supported}))
     if model.config.vocab_size != tokenizer.vocab_size:
         raise ValueError("Checkpoint model and tokenizer vocabulary sizes do not match")
-    model.load_state_dict(checkpoint["model"])
+    try:
+        model.load_state_dict(checkpoint["model"])
+    except RuntimeError as error:
+        raise ValueError("Checkpoint architecture is incompatible with this version; retrain the model.") from error
     return model.to(device).eval(), tokenizer
 
 

@@ -6,9 +6,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from .attention import CausalAttention, LatentAttention
-from .experts import MixtureOfExperts
-from .layers import SwiGLU, apply_rope, make_norm
-from .prediction import MultiTokenPrediction
+from .layers import SwiGLU, apply_rope
 
 
 @dataclass
@@ -22,15 +20,8 @@ class ModelConfig:
     position_encoding: str = "rope"
     feed_forward: str = "swiglu"
     attention: str = "mha"
-    normalization: str = "layernorm"
     kv_rank: int = 0
     rope_dim: int = 0
-    n_experts: int = 0
-    experts_per_token: int = 2
-    expert_hidden: int = 0
-    dense_layers: int = 1
-    router_bias_speed: float = 0.001
-    mtp_weight: float = 0.0
 
     def __post_init__(self):
         if min(self.vocab_size, self.context_size, self.n_layers,
@@ -44,31 +35,23 @@ class ModelConfig:
             raise ValueError("position_encoding must be learned or rope")
         if self.feed_forward not in ("gelu", "swiglu"):
             raise ValueError("feed_forward must be gelu or swiglu")
-        if self.attention not in ("mha", "mla") or self.normalization not in ("layernorm", "rmsnorm"):
-            raise ValueError("Invalid attention or normalization")
+        if self.attention not in ("mha", "mla"):
+            raise ValueError("attention must be mha or mla")
         if self.position_encoding == "rope" and (self.n_embd // self.n_heads) % 2:
             raise ValueError("RoPE requires an even head dimension")
-        if min(self.kv_rank, self.rope_dim, self.n_experts, self.expert_hidden, self.dense_layers) < 0:
-            raise ValueError("Ranks, expert counts, and dimensions must be nonnegative")
+        if min(self.kv_rank, self.rope_dim) < 0:
+            raise ValueError("Attention dimensions must be nonnegative")
         if self.rope_dim % 2 or (self.attention == "mla" and self.position_encoding != "rope"):
             raise ValueError("MLA requires RoPE with an even rotary dimension")
-        if self.n_experts and (not 1 <= self.experts_per_token <= self.n_experts
-                               or self.feed_forward != "swiglu"):
-            raise ValueError("MoE requires SwiGLU and 1 <= experts_per_token <= n_experts")
-        if (not math.isfinite(self.mtp_weight) or self.mtp_weight < 0
-                or not math.isfinite(self.router_bias_speed) or self.router_bias_speed < 0):
-            raise ValueError("Auxiliary weight and routing speed must be finite and nonnegative")
 
 
 class Block(nn.Module):
-    def __init__(self, config, use_experts=False):
+    def __init__(self, config):
         super().__init__()
-        self.ln_attention = make_norm(config)
+        self.ln_attention = nn.LayerNorm(config.n_embd)
         self.attention = LatentAttention(config) if config.attention == "mla" else CausalAttention(config)
-        self.ln_mlp = make_norm(config)
-        if use_experts:
-            self.mlp = MixtureOfExperts(config)
-        elif config.feed_forward == "swiglu":
+        self.ln_mlp = nn.LayerNorm(config.n_embd)
+        if config.feed_forward == "swiglu":
             self.mlp = SwiGLU(config)
         else:
             self.mlp = nn.Sequential(
@@ -90,12 +73,9 @@ class LanguageModel(nn.Module):
         self.position_embedding = (nn.Embedding(config.context_size, config.n_embd)
                                    if config.position_encoding == "learned" else None)
         self.dropout = nn.Dropout(config.dropout)
-        self.blocks = nn.ModuleList(Block(config, bool(config.n_experts and i >= config.dense_layers))
-                                    for i in range(config.n_layers))
-        self.ln_final = make_norm(config)
+        self.blocks = nn.ModuleList(Block(config) for _ in range(config.n_layers))
+        self.ln_final = nn.LayerNorm(config.n_embd)
         self.head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.mtp = MultiTokenPrediction(config, Block(config)) if config.mtp_weight else None
-        self.loss_components = {}
         self.apply(self._init_weights)
         self.head.weight = self.token_embedding.weight
 
@@ -127,26 +107,11 @@ class LanguageModel(nn.Module):
                 next_cache.append(layer_cache)
         logits = self.head(self.ln_final(x))
         loss = None
-        self.loss_components = {}
         if targets is not None:
             if targets.shape != tokens.shape:
                 raise ValueError("targets must have the same shape as tokens")
             loss = F.cross_entropy(logits.reshape(-1, self.config.vocab_size), targets.reshape(-1))
-            self.loss_components["next_token"] = loss.detach()
-            if self.training and self.mtp is not None and tokens.size(1) > 1:
-                predicted = self.mtp(x[:, :-1], self.token_embedding(targets[:, :-1]))
-                mtp_loss = F.cross_entropy(self.head(predicted).reshape(-1, self.config.vocab_size),
-                                           targets[:, 1:].reshape(-1))
-                self.loss_components["mtp"] = mtp_loss.detach()
-                loss = loss + self.config.mtp_weight * mtp_loss
         return (logits, loss, next_cache) if use_cache else (logits, loss)
-
-    @torch.no_grad()
-    def update_router_bias(self):
-        if self.training:
-            for module in self.modules():
-                if isinstance(module, MixtureOfExperts):
-                    module.update_bias(self.config.router_bias_speed)
 
     @torch.no_grad()
     def generate(self, tokens, max_new_tokens=100, temperature=0.8, top_k=40,

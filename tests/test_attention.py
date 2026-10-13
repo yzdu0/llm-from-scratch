@@ -2,13 +2,10 @@ from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
 
 import torch
-from torch.nn import functional as F
 
 from llm.attention import LatentAttention
-from llm.experts import MixtureOfExperts
 from llm.generate import load_model
 from llm.layers import RMSNorm, apply_rope
 from llm.model import LanguageModel, ModelConfig
@@ -16,13 +13,12 @@ from llm.tokenizer import BPETokenizer
 from llm.train import save_checkpoint
 
 
-class DeepSeekTests(unittest.TestCase):
+class AttentionTests(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(11)
         torch.set_num_threads(1)
         self.config = ModelConfig(context_size=8, n_layers=2, n_heads=2, n_embd=16,
-                                  dropout=0, attention="mla", normalization="rmsnorm",
-                                  n_experts=4, mtp_weight=0.1)
+                                  dropout=0, attention="mla")
 
     def test_rmsnorm_matches_definition_and_preserves_dtype(self):
         norm = RMSNorm(4)
@@ -87,74 +83,15 @@ class DeepSeekTests(unittest.TestCase):
                     torch.testing.assert_close(cached, reference)
                 self.assertTrue(model.training)
 
-    def test_mla_and_experts_are_causal(self):
+    def test_mla_is_causal(self):
         model = LanguageModel(self.config).eval()
         tokens = torch.tensor([[1, 2, 3, 4, 5]])
         changed = torch.tensor([[1, 2, 3, 90, 91]])
         torch.testing.assert_close(model(tokens)[0][:, :3], model(changed)[0][:, :3])
 
-    def test_sparse_experts_match_reference_and_only_selected_experts_get_gradients(self):
-        moe = MixtureOfExperts(self.config)
-        with torch.no_grad():
-            moe.router.weight.zero_()
-            moe.routing_bias.copy_(torch.tensor([1., 0.5, -0.5, -1.]))
-        x = torch.randn(2, 3, 16)
-        selected, weights = moe.route(x.reshape(-1, 16))
-        self.assertEqual(set(selected.flatten().tolist()), {0, 1})
-        torch.testing.assert_close(weights, torch.full_like(weights, 0.5))
-        gates = torch.zeros(6, 4).scatter(1, selected, weights)
-        expected = moe.shared(x.reshape(-1, 16))
-        for i, expert in enumerate(moe.experts):
-            expected = expected + expert(x.reshape(-1, 16)) * gates[:, i:i + 1]
-        actual = moe(x)
-        torch.testing.assert_close(actual, expected.view_as(x))
-        self.assertEqual(moe.counts.sum().item(), 12)
-        actual.square().sum().backward()
-        self.assertIsNotNone(moe.shared.gate.weight.grad)
-        self.assertIsNotNone(moe.router.weight.grad)
-        self.assertIsNotNone(moe.experts[0].gate.weight.grad)
-        self.assertIsNone(moe.experts[2].gate.weight.grad)
-
-    def test_router_bias_updates_after_step_and_evaluation_is_read_only(self):
-        model = LanguageModel(self.config)
-        moe = model.blocks[1].mlp
-        moe.counts.copy_(torch.tensor([9., 3., 0., 0.]))
-        before = moe.routing_bias.clone()
-        model.update_router_bias()
-        torch.testing.assert_close(moe.routing_bias - before, torch.tensor([-0.001, 0., 0.001, 0.001]))
-        self.assertEqual(moe.counts.sum().item(), 0)
-        before = moe.routing_bias.clone()
-        model.eval()
-        model(torch.tensor([[1, 2, 3]]))
-        model.update_router_bias()
-        torch.testing.assert_close(moe.routing_bias, before)
-        self.assertEqual(moe.counts.sum().item(), 0)
-
-    def test_sequential_mtp_alignment_and_gradients(self):
-        model = LanguageModel(self.config)
-        captured = []
-        hook = model.blocks[-1].register_forward_hook(lambda module, args, output: captured.append(output[0]))
-        tokens = torch.tensor([[1, 2, 3, 4]])
-        targets = torch.tensor([[2, 3, 4, 5]])
-        logits, loss = model(tokens, targets)
-        hook.remove()
-        hidden = model.mtp(captured[0][:, :-1], model.token_embedding(targets[:, :-1]))
-        expected = F.cross_entropy(logits.reshape(-1, 256), targets.flatten())
-        expected += 0.1 * F.cross_entropy(model.head(hidden).reshape(-1, 256), targets[:, 1:].flatten())
-        torch.testing.assert_close(loss, expected)
-        loss.backward()
-        self.assertIsNotNone(model.mtp.merge.weight.grad)
-        self.assertIsNotNone(model.mtp.block.attention.kv_up.weight.grad)
-        model.eval()
-        with patch.object(model.mtp, "forward", side_effect=AssertionError("MTP used during evaluation")):
-            evaluated, loss = model(tokens, targets)
-        torch.testing.assert_close(loss, F.cross_entropy(evaluated.reshape(-1, 256), targets.flatten()))
-        self.assertEqual(set(model.loss_components), {"next_token"})
-
-    def test_deepseek_checkpoint_roundtrip_includes_router_bias(self):
+    def test_mla_checkpoint_roundtrip(self):
         tokenizer = BPETokenizer.train("To be, or not to be.", vocab_size=256)
         model = LanguageModel(self.config).eval()
-        model.blocks[1].mlp.routing_bias.fill_(0.25)
         prompt = torch.tensor([[1, 2, 3]])
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model.pt"
@@ -162,12 +99,10 @@ class DeepSeekTests(unittest.TestCase):
             restored, _ = load_model(path)
             torch.testing.assert_close(restored(prompt)[0], model(prompt)[0])
             self.assertEqual(restored.config.attention, "mla")
-            torch.testing.assert_close(restored.blocks[1].mlp.routing_bias,
-                                       model.blocks[1].mlp.routing_bias)
 
     def test_invalid_configuration_and_cache(self):
-        for kwargs in ({"rope_dim": 3}, {"n_experts": 1, "experts_per_token": 2},
-                       {"attention": "mla", "position_encoding": "learned"}, {"mtp_weight": -1}):
+        for kwargs in ({"rope_dim": 3}, {"kv_rank": -1},
+                       {"attention": "mla", "position_encoding": "learned"}, {"attention": "unknown"}):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 ModelConfig(**kwargs)
         model = LanguageModel(self.config)
@@ -176,3 +111,20 @@ class DeepSeekTests(unittest.TestCase):
         model.eval()
         with self.assertRaises(ValueError):
             model(torch.tensor([[1]]), cache=[], use_cache=True)
+
+    def test_dense_checkpoint_ignores_unused_legacy_config_and_rejects_incompatible_weights(self):
+        tokenizer = BPETokenizer.train("To be, or not to be.", vocab_size=256)
+        model = LanguageModel(replace(self.config, attention="mha")).eval()
+        prompt = torch.tensor([[1, 2, 3]])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model.pt"
+            save_checkpoint(path, model, tokenizer, 10, 4.2)
+            checkpoint = torch.load(path, weights_only=True)
+            checkpoint["config"].update(normalization="layernorm", n_experts=0, mtp_weight=0.0)
+            torch.save(checkpoint, path)
+            restored, _ = load_model(path)
+            torch.testing.assert_close(restored(prompt)[0], model(prompt)[0])
+            checkpoint["model"]["removed_module.weight"] = torch.zeros(1)
+            torch.save(checkpoint, path)
+            with self.assertRaisesRegex(ValueError, "incompatible"):
+                load_model(path)

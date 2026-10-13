@@ -16,10 +16,6 @@ class RMSNorm(nn.Module):
         return (normalized * self.weight).to(x.dtype)
 
 
-def make_norm(config):
-    return RMSNorm(config.n_embd) if config.normalization == "rmsnorm" else nn.LayerNorm(config.n_embd)
-
-
 def apply_rope(x, cos, sin):
     first, second = x.reshape(*x.shape[:-1], -1, 2).unbind(dim=-1)
     cos, sin = cos.to(x.dtype), sin.to(x.dtype)
@@ -28,9 +24,9 @@ def apply_rope(x, cos, sin):
 
 
 class SwiGLU(nn.Module):
-    def __init__(self, config, hidden=None):
+    def __init__(self, config):
         super().__init__()
-        hidden = hidden or math.ceil((8 * config.n_embd / 3) / 8) * 8
+        hidden = math.ceil((8 * config.n_embd / 3) / 8) * 8
         self.gate = nn.Linear(config.n_embd, hidden, bias=False)
         self.up = nn.Linear(config.n_embd, hidden, bias=False)
         self.down = nn.Linear(hidden, config.n_embd, bias=False)
