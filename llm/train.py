@@ -52,6 +52,18 @@ def load_cached_data(path, context_size, vocab_size=8192, validation_path=None,
         raise ValueError("Supply both extra training and validation files")
     if extra_path is not None:
         paths.extend([Path(extra_path).resolve(), Path(extra_validation_path).resolve()])
+    splits, tokenizer = load_cached_files(paths, context_size, vocab_size, cache_dir)
+    if extra_path is not None:
+        return (MixedData(splits[0], splits[2], extra_ratio),
+                MixedData(splits[1], splits[3], extra_ratio), tokenizer)
+    return *splits, tokenizer
+
+
+def load_cached_files(paths, context_size, vocab_size, cache_dir):
+    """Paths alternate training and validation; only training files teach BPE merges."""
+    paths = [Path(path).resolve() for path in paths]
+    if not paths or len(paths) % 2:
+        raise ValueError("Supply one training/validation pair per source")
     if len(set(paths)) != len(paths):
         raise ValueError("Training and validation files must all differ")
     fingerprint = {"format": 1, "vocab_size": vocab_size, "files": [
@@ -70,7 +82,9 @@ def load_cached_data(path, context_size, vocab_size=8192, validation_path=None,
         temporary.replace(tokenizer_path)
     dtype = np.uint16 if tokenizer.vocab_size <= 65536 else np.uint32
     splits = []
-    for split, source in zip(("train", "validation", "extra_train", "extra_validation"), paths):
+    for index, source in enumerate(paths):
+        names = ("train", "validation", "extra_train", "extra_validation")
+        split = names[index] if index < 4 else f"source_{index // 2}_{'train' if index % 2 == 0 else 'validation'}"
         encoded = root / f"{split}.bin"
         if not encoded.exists():
             print(f"Encoding {split} to {encoded}...", flush=True)
@@ -96,10 +110,53 @@ def load_cached_data(path, context_size, vocab_size=8192, validation_path=None,
         if len(data) <= context_size:
             raise ValueError("Corpus needs enough tokens for a context plus target in both splits")
         splits.append(data)
-    if extra_path is not None:
-        return (MixedData(splits[0], splits[2], extra_ratio),
-                MixedData(splits[1], splits[3], extra_ratio), tokenizer)
-    return *splits, tokenizer
+    return splits, tokenizer
+
+
+def load_mixture(path, context_size, vocab_size=8192, cache_dir="data/token-cache"):
+    manifest_path = Path(path).resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    records = manifest.get("sources", [])
+    if not records:
+        raise ValueError("Mixture must contain sources")
+    names = [record["name"] for record in records]
+    if len(set(names)) != len(names) or not all(name.isidentifier() for name in names):
+        raise ValueError("Mixture source names must be unique identifiers")
+    weights = {record["name"]: record["weight"] for record in records}
+    # Validate weights before any expensive tokenizer training.
+    WeightedData({name: [] for name in names}, weights)
+    paths = [manifest_path.parent / record[split] for record in records for split in ("train", "validation")]
+    splits, tokenizer = load_cached_files(paths, context_size, vocab_size, cache_dir)
+    train = WeightedData(dict(zip(names, splits[::2])), weights)
+    validation = WeightedData(dict(zip(names, splits[1::2])), weights)
+    return train, validation, tokenizer
+
+
+class WeightedData:
+    """Sample fixed-length sequences by source weight, independent of source size."""
+
+    def __init__(self, sources, weights):
+        if (not sources or set(sources) != set(weights)
+                or not all(math.isfinite(w) and w > 0 for w in weights.values())
+                or not math.isclose(sum(weights.values()), 1.0, abs_tol=1e-8)):
+            raise ValueError("Source weights must be positive, finite, and sum to one")
+        self.sources, self.weights = sources, weights
+
+    def __len__(self):
+        return sum(map(len, self.sources.values()))
+
+    def batch(self, batch_size, context_size, device, generator=None):
+        probabilities = torch.tensor([self.weights[name] for name in self.sources])
+        selected = torch.multinomial(probabilities, batch_size, replacement=True, generator=generator)
+        x = torch.empty((batch_size, context_size), dtype=torch.long)
+        y = torch.empty_like(x)
+        for index, data in enumerate(self.sources.values()):
+            mask = selected == index
+            count = int(mask.sum())
+            if count:
+                bx, by = get_batch(data, count, context_size, "cpu", generator)
+                x[mask], y[mask] = bx, by
+        return x.to(device), y.to(device)
 
 
 class MixedData:
@@ -144,7 +201,7 @@ def save_checkpoint(path, model, tokenizer, step, validation_loss, training_info
 
 
 def get_batch(data, batch_size, context_size, device, generator=None):
-    if isinstance(data, MixedData):
+    if isinstance(data, (MixedData, WeightedData)):
         return data.batch(batch_size, context_size, device, generator)
     if isinstance(data, TranslationData):
         return data.batch(batch_size, device, generator)
@@ -200,6 +257,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train a BPE-tokenized GPT from random weights")
     parser.add_argument("--task", choices=["language-model", "translation"], default="language-model")
     parser.add_argument("--data", help="Defaults to Shakespeare text or enzh JSONL for translation")
+    parser.add_argument("--data-mixture", help="JSON manifest of weighted training/validation sources; requires token-cache-dir")
     parser.add_argument("--validation-data", help="Separate validation text; otherwise use a 90/10 split")
     parser.add_argument("--token-cache-dir", help="Stream corpus into disk-backed tokens here; requires validation-data")
     parser.add_argument("--extra-data", help="Second language-model training corpus, sampled independently")
@@ -207,7 +265,7 @@ def main():
     parser.add_argument("--extra-data-ratio", type=float, default=0.1,
                         help="Fraction of sequences sampled from extra-data (default: 0.1)")
     parser.add_argument("--vocab-size", type=int, default=8192)
-    parser.add_argument("--attention", choices=["mha", "mla"], default="mha")
+    parser.add_argument("--attention", choices=["mha", "mla"], default="mla")
     parser.add_argument("--kv-rank", type=int, default=0, help="MLA latent width; 0 selects half model width")
     parser.add_argument("--out", help="Defaults to checkpoints/model.pt (translation: enzh.pt)")
     parser.add_argument("--steps", type=int, default=8000)
@@ -229,14 +287,18 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     translating = args.task == "translation"
-    if args.token_cache_dir and (translating or not args.validation_data):
+    if args.data_mixture and (translating or args.data or args.validation_data or args.extra_data
+                             or args.extra_validation_data or not args.token_cache_dir):
+        parser.error("data-mixture requires token-cache-dir and cannot be combined with individual corpus options or translation")
+    if args.token_cache_dir and (translating or (not args.validation_data and not args.data_mixture)):
         parser.error("token-cache-dir requires language-model training and validation-data")
     if ((args.extra_data is None) != (args.extra_validation_data is None)
             or (args.extra_data and (translating or not args.token_cache_dir))):
         parser.error("extra-data requires extra-validation-data, token-cache-dir, and language-model training")
     if not math.isfinite(args.extra_data_ratio) or not 0 < args.extra_data_ratio < 1:
         parser.error("extra-data-ratio must be finite and in (0, 1)")
-    args.data = args.data or ("data/enzh.jsonl" if translating else "data/shakespeare.txt")
+    if not args.data_mixture:
+        args.data = args.data or ("data/enzh.jsonl" if translating else "data/shakespeare.txt")
     args.out = args.out or ("checkpoints/enzh.pt" if translating else "checkpoints/model.pt")
     if translating and args.validation_data is None and args.data == "data/enzh.jsonl":
         args.validation_data = "data/enzh-valid.jsonl"
@@ -251,7 +313,10 @@ def main():
     torch.manual_seed(args.seed)
     device = choose_device() if args.device == "auto" else args.device
     print("Training BPE tokenizer and encoding corpus...", flush=True)
-    if args.token_cache_dir:
+    if args.data_mixture:
+        train, validation, tokenizer = load_mixture(args.data_mixture, args.context_size,
+                                                   args.vocab_size, args.token_cache_dir)
+    elif args.token_cache_dir:
         train, validation, tokenizer = load_cached_data(args.data, args.context_size,
                                                        args.vocab_size, args.validation_data,
                                                        args.token_cache_dir, args.extra_data,
@@ -282,6 +347,12 @@ def main():
               f"primary_tokens={len(train.primary):,} extra_tokens={len(train.extra):,} "
               f"expected_primary_passes≈{budget * (1 - train.ratio) / len(train.primary):.2f} "
               f"expected_extra_passes≈{budget * train.ratio / len(train.extra):.2f}", flush=True)
+    if isinstance(train, WeightedData):
+        training_info["source_tokens"] = {name: len(data) for name, data in train.sources.items()}
+        training_info["source_weights"] = train.weights.copy()
+        for name, data in train.sources.items():
+            passes = args.steps * tokens_per_step * train.weights[name] / len(data)
+            print(f"source={name} share={train.weights[name]:.0%} tokens={len(data):,} expected_passes≈{passes:.2f}", flush=True)
     print(f"effective_batch={args.batch_size * args.grad_accum_steps} "
           f"tokens_per_step={tokens_per_step:,} token_budget={args.steps * tokens_per_step:,} "
           f"corpus_passes≈{args.steps * tokens_per_step / train_tokens:.2f}", flush=True)
@@ -296,10 +367,15 @@ def main():
             group["lr"] = lr
         if step % args.eval_every == 0 or step == args.steps:
             splits = {"train": train, "validation": validation}
+            if isinstance(validation, WeightedData):
+                splits = {"train": train, **{name + "_validation": data for name, data in validation.sources.items()}}
             if isinstance(validation, MixedData):
                 splits.update(primary_validation=validation.primary, extra_validation=validation.extra)
             losses = evaluate(model, splits,
                               args.batch_size, device, args.eval_batches)
+            if isinstance(validation, WeightedData):
+                losses["validation"] = sum(validation.weights[name] * losses[name + "_validation"]
+                                            for name in validation.sources)
             if isinstance(validation, MixedData):
                 # Select checkpoints with a fixed source weighting rather than a noisy source draw.
                 losses["validation"] = ((1 - validation.ratio) * losses["primary_validation"]
@@ -315,6 +391,9 @@ def main():
             if isinstance(validation, MixedData):
                 print(f"primary_validation={losses['primary_validation']:.4f} "
                       f"extra_validation={losses['extra_validation']:.4f}", flush=True)
+            if isinstance(validation, WeightedData):
+                print(" ".join(f"{name}_validation={losses[name + '_validation']:.4f}"
+                               for name in validation.sources), flush=True)
             if losses["validation"] < best_loss:
                 best_loss = losses["validation"]
                 save_checkpoint(best_output, model, tokenizer, step, best_loss, training_info)

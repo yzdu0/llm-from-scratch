@@ -14,6 +14,8 @@ data/darkfiction*.txt
 data/darkfiction.json
 data/books*.txt
 data/books.json
+data/balanced*.txt
+data/balanced*.json
 data/tinystories-dark.json
 data/*-sources/
 data/enzh*.jsonl

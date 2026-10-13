@@ -1,5 +1,21 @@
 # Corpora
 
+## Expanded books and five-category mixture
+
+`python -m llm.prepare --corpus books` prepares 115 English fiction editions,
+including the original 34 works plus 81 additional gothic, ghost-story, and
+mystery editions. There are 109 training works and six whole held-out works.
+
+`python -m llm.prepare --corpus balanced` prepares the active **80% fiction /
+20% education** mixture. Education is sampled as 6% general nonfiction, 6% maths
+books, and 8% worked maths out of all training tokens. All 115 fiction editions
+remain included, alongside the existing education and maths sources. Previously
+prepared dialogue, Q&A, and essay files remain on disk but are not sampled.
+`data/balanced.json` records the weights; originals and licenses are preserved
+in `books-sources/`.
+
+See the [MLA training command and approximation details](../docs/balanced.md).
+
 ## Modern English
 
 [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) contains

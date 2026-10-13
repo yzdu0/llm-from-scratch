@@ -7,6 +7,8 @@ import re
 from urllib.request import urlopen
 
 from .tokenizer import EOS_TOKEN
+from .book_catalog import BALANCED_BOOKS, EXTRA_BOOKS
+from .maths import prepare_worked_maths
 
 
 SOURCE_URL = "https://www.gutenberg.org/ebooks/100.txt.utf-8"
@@ -49,15 +51,16 @@ BOOKS = DARK_BOOKS + (
     (113, "The Secret Garden", "Frances Hodgson Burnett", "train"),
     (5230, "The Invisible Man", "H. G. Wells", "validation"),
     (105, "Persuasion", "Jane Austen", "validation"),
-)
+) + EXTRA_BOOKS
 
 
-def prepare_books(output):
+def prepare_books(output, catalog=None):
     """Build a books-only corpus, keeping whole held-out works out of training."""
     output = Path(output)
+    catalog = BOOKS if catalog is None else catalog
     output.parent.mkdir(parents=True, exist_ok=True)
     paths = {"train": output, "validation": output.with_name(output.stem + "-valid.txt")}
-    if len({book[0] for book in BOOKS}) != len(BOOKS):
+    if len({book[0] for book in catalog}) != len(catalog):
         raise ValueError("Book catalog must not contain duplicate editions")
     originals = output.parent / "books-sources"
     originals.mkdir(exist_ok=True)
@@ -67,7 +70,7 @@ def prepare_books(output):
         with ExitStack() as stack:
             streams = {split: stack.enter_context(path.open("w", encoding="utf-8"))
                        for split, path in pending.items()}
-            for ebook, title, author, split in BOOKS:
+            for ebook, title, author, split in catalog:
                 if split not in streams:
                     raise ValueError(f"Invalid book split: {split}")
                 url = f"https://www.gutenberg.org/ebooks/{ebook}.txt.utf-8"
@@ -96,9 +99,37 @@ def prepare_books(output):
     metadata = {"dataset": "Classic books: Project Gutenberg", "books": records,
                 "train_books": sum(book["split"] == "train" for book in records),
                 "validation_books": sum(book["split"] == "validation" for book in records),
-                "split": "Whole works; The Turn of the Screw, The Invisible Man, and Persuasion held out",
+                "split": "Whole works; held out: " + ", ".join(book["title"] for book in records if book["split"] == "validation"),
                 "rights": "Original Gutenberg files and licenses preserved in sources directory"}
     output.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+
+
+BALANCED_WEIGHTS = {"fiction": 0.80, "education": 0.06,
+                    "maths_books": 0.06, "maths_worked": 0.08}
+
+
+def prepare_balanced(output):
+    """Sample 80% fiction and 20% education, retaining the education maths balance."""
+    output = Path(output)
+    prepare_books(output.parent / "books.txt")
+    sources = []
+    for name, weight in BALANCED_WEIGHTS.items():
+        path = output.parent / "books.txt" if name == "fiction" else output.with_name(output.stem + f"-{name}.txt")
+        if name == "maths_worked":
+            prepare_worked_maths(path)
+        elif name != "fiction":
+            prepare_books(path, BALANCED_BOOKS[name])
+        sources.append({"name": name, "weight": weight, "train": path.name,
+                        "validation": path.with_name(path.stem + "-valid.txt").name,
+                        "provenance": path.with_suffix(".json").name})
+    metadata = {"dataset": "80% fiction / 20% education mixture", "sources": sources,
+                "fiction_total": 0.80, "education_total": 0.20, "maths_total": 0.14,
+                "sampling": "Fixed-length sequences selected by category weight, then uniformly by token position",
+                "notes": ["All existing fiction works retained; complete works held out for validation.",
+                          "Maths books and exact worked examples have separately guaranteed sampling shares.",
+                          "Educational facts and perspectives reflect the historical sources."]}
+    output.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    print(f"Saved mixture manifest: {output.with_suffix('.json')}", flush=True)
 
 
 def prepare_darkfiction(output, mix_with=None, mix_validation_with=None):
@@ -247,7 +278,7 @@ def clean_gutenberg(text: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare text or English-Chinese sentence pairs")
-    parser.add_argument("--corpus", choices=["shakespeare", "tinystories", "darkfiction", "books", "enzh"], default="shakespeare")
+    parser.add_argument("--corpus", choices=["shakespeare", "tinystories", "darkfiction", "books", "balanced", "enzh"], default="shakespeare")
     parser.add_argument("--source", help="Existing Gutenberg UTF-8 file or enzh ZIP archive")
     parser.add_argument("--out", help="Defaults to data/<corpus>.txt (enzh: .jsonl)")
     parser.add_argument("--stories", type=int, default=10000)
@@ -262,10 +293,10 @@ def main():
     output = Path(args.out or f"data/{corpus_name}.{extension}")
     if args.corpus != "tinystories" and (args.all_stories or args.story_version != "original"):
         parser.error("all-stories and story-version apply only to TinyStories")
-    if args.corpus == "books":
+    if args.corpus in ("books", "balanced"):
         if args.source or args.mix_with or args.mix_validation_with:
-            parser.error("Books uses its own catalog and does not accept source or corpus mixing")
-        prepare_books(output)
+            parser.error("Books and balanced use their own catalogs and do not accept source or corpus mixing")
+        (prepare_balanced if args.corpus == "balanced" else prepare_books)(output)
         return
     if args.corpus == "enzh":
         if args.mix_with or args.mix_validation_with:
