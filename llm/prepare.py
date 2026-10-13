@@ -8,10 +8,8 @@ from urllib.request import urlopen
 
 from .tokenizer import EOS_TOKEN
 from .book_catalog import BALANCED_BOOKS, EXTRA_BOOKS
-from .maths import prepare_worked_maths
 
 
-SOURCE_URL = "https://www.gutenberg.org/ebooks/100.txt.utf-8"
 STORIES_URL = "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main"
 DARK_BOOKS = (
     (345, "Dracula", "Bram Stoker", "train"),
@@ -75,11 +73,8 @@ def prepare_books(output, catalog=None):
                     raise ValueError(f"Invalid book split: {split}")
                 url = f"https://www.gutenberg.org/ebooks/{ebook}.txt.utf-8"
                 source = originals / f"{ebook}.txt"
-                existing = output.parent / "darkfiction-sources" / f"{ebook}.txt"
                 if source.exists():
                     raw = source.read_bytes()
-                elif existing.exists():
-                    raw = existing.read_bytes()
                 else:
                     print(f"Downloading {title}: {url}", flush=True)
                     with urlopen(url, timeout=60) as response:
@@ -104,94 +99,29 @@ def prepare_books(output, catalog=None):
     output.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
 
-BALANCED_WEIGHTS = {"fiction": 0.80, "education": 0.06,
-                    "maths_books": 0.06, "maths_worked": 0.08}
+BALANCED_WEIGHTS = {"fiction": 0.80, "education": 0.10, "maths_books": 0.10}
 
 
 def prepare_balanced(output):
-    """Sample 80% fiction and 20% education, retaining the education maths balance."""
+    """Sample 80% fiction and 20% education, using general education and maths books."""
     output = Path(output)
     prepare_books(output.parent / "books.txt")
     sources = []
     for name, weight in BALANCED_WEIGHTS.items():
         path = output.parent / "books.txt" if name == "fiction" else output.with_name(output.stem + f"-{name}.txt")
-        if name == "maths_worked":
-            prepare_worked_maths(path)
-        elif name != "fiction":
+        if name != "fiction":
             prepare_books(path, BALANCED_BOOKS[name])
         sources.append({"name": name, "weight": weight, "train": path.name,
                         "validation": path.with_name(path.stem + "-valid.txt").name,
                         "provenance": path.with_suffix(".json").name})
     metadata = {"dataset": "80% fiction / 20% education mixture", "sources": sources,
-                "fiction_total": 0.80, "education_total": 0.20, "maths_total": 0.14,
+                "fiction_total": 0.80, "education_total": 0.20, "maths_total": 0.10,
                 "sampling": "Fixed-length sequences selected by category weight, then uniformly by token position",
                 "notes": ["All existing fiction works retained; complete works held out for validation.",
-                          "Maths books and exact worked examples have separately guaranteed sampling shares.",
+                          "General education and maths books each receive half of the education share.",
                           "Educational facts and perspectives reflect the historical sources."]}
     output.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     print(f"Saved mixture manifest: {output.with_suffix('.json')}", flush=True)
-
-
-def prepare_darkfiction(output, mix_with=None, mix_validation_with=None):
-    output = Path(output)
-    validation = output.with_name(output.stem + "-valid.txt")
-    if (mix_with is None) != (mix_validation_with is None):
-        raise ValueError("Supply both training and validation files when mixing corpora")
-    sources = [Path(path) for path in (mix_with, mix_validation_with) if path is not None]
-    if len(sources) == 2 and sources[0].resolve() == sources[1].resolve():
-        raise ValueError("Training and validation inputs must be distinct")
-    if any(path.resolve() in {output.resolve(), validation.resolve()} for path in sources):
-        raise ValueError("Output files must differ from the input corpora")
-    parts = {"train": [], "validation": []}
-    for split, path in zip(parts, sources):
-        base = path.read_text(encoding="utf-8").rstrip()
-        parts[split].append(base + ("\n" if base.endswith(EOS_TOKEN) else "\n" + EOS_TOKEN + "\n"))
-    originals = output.parent / "darkfiction-sources"
-    originals.mkdir(parents=True, exist_ok=True)
-    records = []
-    for ebook, title, author, split in DARK_BOOKS:
-        url = f"https://www.gutenberg.org/ebooks/{ebook}.txt.utf-8"
-        source = originals / f"{ebook}.txt"
-        if source.exists():
-            raw = source.read_bytes()
-        else:
-            print(f"Downloading {title}: {url}", flush=True)
-            with urlopen(url, timeout=60) as response:
-                raw = response.read()
-        cleaned = clean_gutenberg(raw.decode("utf-8-sig"))
-        source.write_bytes(raw)
-        parts[split].append(cleaned + EOS_TOKEN + "\n")
-        records.append({"title": title, "author": author, "ebook": ebook, "split": split,
-                        "url": url, "source": str(source), "characters": len(cleaned),
-                        "sha256": hashlib.sha256(raw).hexdigest()})
-    for path, split in ((output, "train"), (validation, "validation")):
-        text = "\n".join(parts[split])
-        path.write_text(text, encoding="utf-8")
-        print(f"Saved {path}: {len(text):,} characters", flush=True)
-    metadata = {"dataset": "Dark fiction: Project Gutenberg", "books": records,
-                "split": "Whole works; The Turn of the Screw is held out",
-                "mixed_with": [str(path) for path in sources],
-                "rights": "Original Gutenberg files and licenses preserved in sources directory"}
-    output.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
-
-
-def read_stories(lines, count):
-    """Keep complete records and stop reading once the requested subset is ready."""
-    if count < 1:
-        raise ValueError("Story count must be positive")
-    stories, current = [], []
-    for line in lines:
-        text = line.decode("utf-8")
-        if text.strip() == EOS_TOKEN:
-            story = "".join(current).strip()
-            if story:
-                stories.append(story + "\n" + EOS_TOKEN + "\n")
-            current = []
-            if len(stories) == count:
-                return "\n".join(stories)
-        else:
-            current.append(text)
-    raise ValueError(f"Expected {count} complete stories, found {len(stories)}")
 
 
 def write_stories(lines, destination, count=None, allow_incomplete_tail=False):
@@ -222,12 +152,14 @@ def write_stories(lines, destination, count=None, allow_incomplete_tail=False):
     return written
 
 
-def prepare_stories(output, train_count, validation_count, version="original"):
+def prepare_stories(output, train_count, validation_count, version="gpt4"):
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     validation = output.with_name(output.stem + "-valid.txt")
     urls = []
-    prefix = "TinyStoriesV2-GPT4" if version == "gpt4" else "TinyStories"
+    if version != "gpt4":
+        raise ValueError("Only GPT-4 TinyStories is supported")
+    prefix = "TinyStoriesV2-GPT4"
     counts, pending = [], []
     try:
         for split, count, path in (("train", train_count, output),
@@ -277,58 +209,24 @@ def clean_gutenberg(text: str) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Prepare text or English-Chinese sentence pairs")
-    parser.add_argument("--corpus", choices=["shakespeare", "tinystories", "darkfiction", "books", "balanced", "enzh"], default="shakespeare")
-    parser.add_argument("--source", help="Existing Gutenberg UTF-8 file or enzh ZIP archive")
-    parser.add_argument("--out", help="Defaults to data/<corpus>.txt (enzh: .jsonl)")
-    parser.add_argument("--stories", type=int, default=10000)
-    parser.add_argument("--validation-stories", type=int, default=1000)
-    parser.add_argument("--story-version", choices=["original", "gpt4"], default="original")
-    parser.add_argument("--all-stories", action="store_true", help="Use entire TinyStories training and validation splits")
-    parser.add_argument("--mix-with", help="Existing training corpus to combine with dark fiction")
-    parser.add_argument("--mix-validation-with", help="Matching validation corpus to combine with dark fiction")
+    parser = argparse.ArgumentParser(description="Prepare 80/20 books or GPT-4 TinyStories")
+    parser.add_argument("--corpus", choices=["balanced", "tinystories"], default="balanced")
+    parser.add_argument("--out", help="Output prefix; defaults to data/balanced.txt or data/tinystories-gpt4.txt")
+    parser.add_argument("--story-version", choices=["gpt4"], default="gpt4")
+    parser.add_argument("--stories", type=int, help="Optional training subset; default is the full split")
+    parser.add_argument("--validation-stories", type=int, help="Optional validation subset")
+    parser.add_argument("--all-stories", action="store_true", help="Use full GPT-4 splits (the default)")
     args = parser.parse_args()
-    extension = "jsonl" if args.corpus == "enzh" else "txt"
-    corpus_name = "tinystories-gpt4" if args.corpus == "tinystories" and args.story_version == "gpt4" else args.corpus
-    output = Path(args.out or f"data/{corpus_name}.{extension}")
-    if args.corpus != "tinystories" and (args.all_stories or args.story_version != "original"):
-        parser.error("all-stories and story-version apply only to TinyStories")
-    if args.corpus in ("books", "balanced"):
-        if args.source or args.mix_with or args.mix_validation_with:
-            parser.error("Books and balanced use their own catalogs and do not accept source or corpus mixing")
-        (prepare_balanced if args.corpus == "balanced" else prepare_books)(output)
-        return
-    if args.corpus == "enzh":
-        if args.mix_with or args.mix_validation_with:
-            parser.error("Translation pairs cannot be mixed with unpaired text")
-        from .translation import prepare_translation
-        prepare_translation(output, args.source)
-        return
-    if args.corpus == "darkfiction":
-        if args.source:
-            parser.error("Dark fiction does not use --source; downloaded originals are cached")
-        prepare_darkfiction(output, args.mix_with, args.mix_validation_with)
-        return
-    if args.mix_with or args.mix_validation_with:
-        parser.error("Corpus mixing is only supported with --corpus darkfiction")
-    if args.corpus == "tinystories":
-        if args.source or min(args.stories, args.validation_stories) < 1:
-            parser.error("TinyStories needs positive story counts and does not use --source")
-        prepare_stories(output, None if args.all_stories else args.stories,
-                        None if args.all_stories else args.validation_stories, args.story_version)
-        return
-    source = output.with_name(output.stem + "-source.txt")
-    if args.source:
-        raw = Path(args.source).read_bytes()
+    if args.corpus == "balanced":
+        if args.stories is not None or args.validation_stories is not None or args.all_stories:
+            parser.error("Story options require --corpus tinystories")
+        prepare_balanced(Path(args.out or "data/balanced.txt"))
     else:
-        print(f"Downloading {SOURCE_URL}", flush=True)
-        with urlopen(SOURCE_URL, timeout=60) as response:
-            raw = response.read()
-    corpus = clean_gutenberg(raw.decode("utf-8-sig"))
-    output.parent.mkdir(parents=True, exist_ok=True)
-    source.write_bytes(raw)
-    output.write_text(corpus, encoding="utf-8")
-    print(f"Saved {output}: {len(corpus):,} characters; original with license: {source}")
+        if args.all_stories and (args.stories is not None or args.validation_stories is not None):
+            parser.error("Choose full splits or subset counts")
+        if any(n is not None and n < 1 for n in (args.stories, args.validation_stories)):
+            parser.error("Story counts must be positive")
+        prepare_stories(Path(args.out or "data/tinystories-gpt4.txt"), args.stories, args.validation_stories)
 
 
 if __name__ == "__main__":

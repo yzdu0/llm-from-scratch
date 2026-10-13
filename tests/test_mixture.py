@@ -13,8 +13,8 @@ from llm.train import WeightedData, get_batch, load_mixture
 
 
 class MixtureTests(unittest.TestCase):
-    def test_five_way_sampling_matches_shares_and_keeps_windows_in_one_source(self):
-        weights = dict(zip(("fiction", "education", "dialogue", "qa", "essays"), (.4, .25, .15, .15, .05)))
+    def test_balanced_sampling_matches_shares_and_keeps_windows_in_one_source(self):
+        weights = dict(zip(("fiction", "education", "maths_books"), (.8, .1, .1)))
         sources = {name: torch.full((40,), index) for index, name in enumerate(weights)}
         data = WeightedData(sources, weights)
         x, y = get_batch(data, 10000, 8, "cpu", torch.Generator().manual_seed(42))
@@ -34,11 +34,11 @@ class MixtureTests(unittest.TestCase):
             root = Path(directory)
             sources = []
             expected_training = []
-            for index, name in enumerate(("fiction", "education", "dialogue", "qa", "essays")):
+            for index, name in enumerate(("fiction", "education", "maths_books")):
                 train, valid = root / f"{name}.txt", root / f"{name}-valid.txt"
                 train.write_text((f"Training source {index}.\n{EOS_TOKEN}\n") * 10)
                 valid.write_text((f"Validation source {index}.\n{EOS_TOKEN}\n") * 10)
-                sources.append({"name": name, "weight": .2, "train": train.name, "validation": valid.name})
+                sources.append({"name": name, "weight": 1 / 3, "train": train.name, "validation": valid.name})
                 expected_training.append(train.resolve())
             manifest = root / "mixture.json"
             manifest.write_text(json.dumps({"sources": sources}))
@@ -58,14 +58,12 @@ class MixtureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "balanced.txt"
             with patch("llm.prepare.prepare_books") as prepare:
-                with patch("llm.prepare.prepare_worked_maths") as worked:
-                    prepare_balanced(output)
-                    worked.assert_called_once()
+                prepare_balanced(output)
             self.assertEqual(prepare.call_args_list[0].args, (output.parent / "books.txt",))
             manifest = json.loads(output.with_suffix(".json").read_text())
             self.assertEqual({source["name"]: source["weight"] for source in manifest["sources"]}, BALANCED_WEIGHTS)
             self.assertAlmostEqual(manifest["education_total"], .2)
-            self.assertAlmostEqual(manifest["maths_total"], .14)
+            self.assertAlmostEqual(manifest["maths_total"], .1)
             self.assertEqual(len(prepare.call_args_list), 3)
 
     def test_catalogs_have_unique_editions_and_keep_original_fiction_held_out(self):

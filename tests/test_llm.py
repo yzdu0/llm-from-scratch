@@ -9,7 +9,7 @@ import torch
 
 from llm.generate import load_model
 from llm.model import LanguageModel, ModelConfig, SwiGLU, apply_rope
-from llm.prepare import clean_gutenberg, prepare_darkfiction, read_stories
+from llm.prepare import clean_gutenberg
 from llm.tokenizer import BPETokenizer, EOS_TOKEN
 from llm.train import get_batch, learning_rate, load_data, make_optimizer, save_checkpoint, train_step
 
@@ -256,46 +256,7 @@ class LanguageModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             clean_gutenberg("Not a Gutenberg ebook")
 
-    def test_story_subset_stops_at_complete_records(self):
-        source = io.BytesIO(f"First story.\n{EOS_TOKEN}\nSecond story.\n{EOS_TOKEN}\nPartial".encode())
-        text = read_stories(source, 1)
-        self.assertEqual(text, f"First story.\n{EOS_TOKEN}\n")
-        self.assertTrue(source.read().startswith(b"Second story."))
-        with self.assertRaises(ValueError):
-            read_stories(io.BytesIO(b"Incomplete story"), 1)
 
-    def test_darkfiction_mixing_preserves_inputs_and_separates_held_out_work(self):
-        books = ((1, "Training work", "Author A", "train"),
-                 (2, "Held-out work", "Author B", "validation"))
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            originals = root / "darkfiction-sources"
-            originals.mkdir()
-            for ebook, title, _, _ in books:
-                text = (f"License\n*** START OF THE PROJECT GUTENBERG EBOOK TEST ***\n"
-                        f"{title}\nSome prose.\n*** END OF THE PROJECT GUTENBERG EBOOK TEST ***\nLicense")
-                (originals / f"{ebook}.txt").write_text(text, encoding="utf-8")
-            train, valid = root / "train.txt", root / "valid.txt"
-            train.write_text("Training story.\n" + EOS_TOKEN + "\n", encoding="utf-8")
-            valid.write_text("Validation story.\n" + EOS_TOKEN + "\n", encoding="utf-8")
-            before = (train.read_bytes(), valid.read_bytes())
-            output = root / "mixed.txt"
-            with patch("llm.prepare.DARK_BOOKS", books), patch("llm.prepare.urlopen") as network:
-                prepare_darkfiction(output, train, valid)
-                network.assert_not_called()
-            training = output.read_text(encoding="utf-8")
-            validation = (root / "mixed-valid.txt").read_text(encoding="utf-8")
-            self.assertIn("Training work", training)
-            self.assertNotIn("Held-out work", training)
-            self.assertIn("Held-out work", validation)
-            self.assertNotIn("Training work", validation)
-            self.assertEqual((train.read_bytes(), valid.read_bytes()), before)
-            self.assertEqual(training.count(EOS_TOKEN), 2)
-            self.assertTrue(output.with_suffix(".json").exists())
-            with self.assertRaises(ValueError):
-                prepare_darkfiction(train, train, valid)
-            with self.assertRaises(ValueError):
-                prepare_darkfiction(output, train)
 
 
 if __name__ == "__main__":

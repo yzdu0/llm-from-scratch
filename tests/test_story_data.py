@@ -10,7 +10,7 @@ import torch
 
 from llm.prepare import prepare_books, prepare_stories, write_stories
 from llm.tokenizer import BPETokenizer, EOS_TOKEN
-from llm.train import MixedData, get_batch, load_cached_data
+from llm.train import get_batch, load_cached_data
 
 
 class StoryDataTests(unittest.TestCase):
@@ -48,34 +48,7 @@ class StoryDataTests(unittest.TestCase):
             self.assertEqual(output.read_bytes(), original)
             self.assertFalse(list(root.glob("*.part")))
 
-    def test_mixed_batches_preserve_sources_targets_and_seed(self):
-        data = MixedData(torch.full((50,), 1), torch.full((50,), 2), 0.25)
-        x, y = get_batch(data, 1000, 8, "cpu", torch.Generator().manual_seed(42))
-        repeated, _ = get_batch(data, 1000, 8, "cpu", torch.Generator().manual_seed(42))
-        torch.testing.assert_close(x, y)
-        torch.testing.assert_close(x, repeated)
-        self.assertTrue(((x == x[:, :1]).all()).item())
-        fraction = (x[:, 0] == 2).float().mean().item()
-        self.assertTrue(0.20 < fraction < 0.30)
-        for ratio in (0, 1, float("nan")):
-            with self.assertRaises(ValueError):
-                MixedData(data.primary, data.extra, ratio)
 
-    def test_mixed_cache_uses_both_training_files_and_keeps_validation_separate(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            paths = [root / name for name in ("story.txt", "story-valid.txt", "dark.txt", "dark-valid.txt")]
-            texts = [(word + "\n" + EOS_TOKEN + "\n") * 30
-                     for word in ("Lily played.", "Jack laughed.", "A shadow lurked.", "A haunted room.")]
-            for path, text in zip(paths, texts):
-                path.write_text(text)
-            with patch.object(BPETokenizer, "train_file", wraps=BPETokenizer.train_file) as train_tokenizer:
-                train, valid, tokenizer = load_cached_data(paths[0], 8, 300, paths[1], root / "cache",
-                                                            paths[2], paths[3], 0.1)
-            self.assertEqual(train_tokenizer.call_args.args[0], [paths[0].resolve(), paths[2].resolve()])
-            for data, text in zip((train.primary, valid.primary, train.extra, valid.extra), texts):
-                self.assertEqual(tokenizer.decode(data.tolist()), text)
-            self.assertEqual(train.ratio, 0.1)
 
     def test_streaming_all_and_subset_preserve_story_endings(self):
         raw = f"First story.\n{EOS_TOKEN}\n\nSecond story.\n{EOS_TOKEN}\n".encode()

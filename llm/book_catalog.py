@@ -94,27 +94,7 @@ BALANCED_BOOKS = {
         (3300, 'An Inquiry into the Nature and Causes of the Wealth of Nations', 'Adam Smith', 'train'),
         (2300, 'The Descent of Man, and Selection in Relation to Sex', 'Charles Darwin', 'validation'),
     ),
-    'dialogue': (
-        (1497, 'The Republic', 'Plato', 'train'),
-        (1656, 'Apology', 'Plato', 'train'),
-        (1524, 'Hamlet', 'William Shakespeare', 'train'),
-        (1533, 'Macbeth', 'William Shakespeare', 'train'),
-        (1513, 'Romeo and Juliet', 'William Shakespeare', 'train'),
-        (1531, 'Othello', 'William Shakespeare', 'train'),
-        (1519, 'Much Ado about Nothing', 'William Shakespeare', 'train'),
-        (1523, 'As You Like It', 'William Shakespeare', 'validation'),
-    ),
-    'qa': (
-        (16728, 'A Catechism of Familiar Things;', 'Anonymous', 'train'),
-        (10998, 'A Catechism of the Steam Engine', 'C. E. John Bourne', 'train'),
-        (76379, 'Catechism of the locomotive', 'Matthias N. Forney Georg Kosak', 'validation'),
-    ),
-    'essays': (
-        (16643, 'Essays by Ralph Waldo Emerson', 'Ralph Waldo Emerson', 'train'),
-        (3600, 'Essays of Michel de Montaigne — Complete', 'Michel de Montaigne', 'train'),
-        (205, 'Walden, and On The Duty Of Civil Disobedience', 'Henry David Thoreau', 'train'),
-        (492, 'Essays in the Art of Writing', 'Robert Louis Stevenson', 'validation'),
-    ),
+
 }
 
 # Readable maths texts; image-only and placeholder-only editions excluded.
