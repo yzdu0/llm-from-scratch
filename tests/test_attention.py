@@ -78,8 +78,9 @@ class AttentionTests(unittest.TestCase):
                 model = LanguageModel(config)
                 for length in (3, 12):
                     prompt = torch.randint(0, 256, (1, length))
-                    cached = model.generate(prompt, 12, temperature=0)
-                    reference = model.generate(prompt, 12, temperature=0, use_cache=False)
+                    cached = model.generate(prompt, 12, temperature=0, repetition_penalty=1.1)
+                    reference = model.generate(prompt, 12, temperature=0, use_cache=False,
+                                               repetition_penalty=1.1)
                     torch.testing.assert_close(cached, reference)
                 self.assertTrue(model.training)
 

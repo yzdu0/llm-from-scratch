@@ -28,6 +28,21 @@ class BPETokenizer:
     def from_json(cls, value: str):
         return cls(Tokenizer.from_str(value))
 
+    @classmethod
+    def train_file(cls, path, vocab_size=8192):
+        """Train from a file without materializing the corpus as a Python string."""
+        if vocab_size < 257:
+            raise ValueError("File BPE needs room for 256 bytes and EOS")
+        tokenizer = Tokenizer(models.BPE())
+        tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+        tokenizer.decoder = decoders.ByteLevel()
+        trainer = trainers.BpeTrainer(vocab_size=vocab_size, min_frequency=2,
+                                      show_progress=True, special_tokens=[EOS_TOKEN],
+                                      initial_alphabet=pre_tokenizers.ByteLevel.alphabet())
+        files = path if isinstance(path, (list, tuple)) else [path]
+        tokenizer.train([str(file) for file in files], trainer)
+        return cls(tokenizer)
+
     def to_json(self) -> str:
         return self.tokenizer.to_str()
 

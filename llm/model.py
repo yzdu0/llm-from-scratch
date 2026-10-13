@@ -16,7 +16,7 @@ class ModelConfig:
     n_layers: int = 4
     n_heads: int = 4
     n_embd: int = 128
-    dropout: float = 0.1
+    dropout: float = 0.0
     position_encoding: str = "rope"
     feed_forward: str = "swiglu"
     attention: str = "mha"
@@ -115,11 +115,15 @@ class LanguageModel(nn.Module):
 
     @torch.no_grad()
     def generate(self, tokens, max_new_tokens=100, temperature=0.8, top_k=40,
-                 eos_token_id=None, use_cache=True):
+                 eos_token_id=None, use_cache=True, repetition_penalty=1.0, top_p=1.0):
         if max_new_tokens < 0 or not math.isfinite(temperature) or temperature < 0:
             raise ValueError("max_new_tokens and temperature must be nonnegative and finite")
         if top_k is not None and top_k < 1:
             raise ValueError("top_k must be positive or None")
+        if not math.isfinite(top_p) or not 0 < top_p <= 1:
+            raise ValueError("top_p must be finite and in (0, 1]")
+        if not math.isfinite(repetition_penalty) or repetition_penalty < 1:
+            raise ValueError("repetition_penalty must be finite and at least 1")
         if tokens.ndim != 2 or tokens.size(1) == 0:
             raise ValueError("Generation requires a nonempty prompt")
         was_training = self.training
@@ -136,6 +140,11 @@ class LanguageModel(nn.Module):
                 else:
                     logits, _ = self(tokens[:, -self.config.context_size:])
                 logits = logits[:, -1, :]
+                if repetition_penalty != 1:
+                    seen = logits.gather(1, tokens)
+                    adjusted = torch.where(seen < 0, seen * repetition_penalty,
+                                           seen / repetition_penalty)
+                    logits = logits.scatter(1, tokens, adjusted)
                 if temperature == 0:
                     next_token = logits.argmax(dim=-1, keepdim=True)
                 else:
@@ -143,6 +152,15 @@ class LanguageModel(nn.Module):
                     if top_k is not None:
                         threshold = logits.topk(min(top_k, logits.size(-1))).values[:, -1:]
                         logits = logits.masked_fill(logits < threshold, float("-inf"))
+                    if top_p < 1:
+                        sorted_logits, indices = logits.sort(dim=-1, descending=True)
+                        cumulative = F.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
+                        # Keep the token that crosses the threshold, and always keep the best.
+                        remove = cumulative > top_p
+                        remove[:, 1:] = remove[:, :-1].clone()
+                        remove[:, 0] = False
+                        sorted_logits = sorted_logits.masked_fill(remove, float("-inf"))
+                        logits = torch.zeros_like(logits).scatter(1, indices, sorted_logits)
                     next_token = torch.multinomial(F.softmax(logits, dim=-1), 1)
                 if eos_token_id is not None:
                     next_token[finished] = eos_token_id

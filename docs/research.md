@@ -10,7 +10,7 @@ Training defaults to `--attention mla`; use `--attention mha` for the baseline.
 The transformer keeps its existing LayerNorm and dense SwiGLU layers;
 RMSNorm is used only inside MLA's compressed projections.
 
-At width 512, MLA caches 320 scalars per token per block versus 1,024 for MHA.
+At width 512 with four heads, MLA caches 320 scalars per token per block versus 1,024 for MHA.
 Cached and uncached greedy generation are tested for equivalence, including
 sliding-window rollover. `--no-cache` disables caching.
 
