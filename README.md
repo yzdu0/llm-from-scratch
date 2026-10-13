@@ -5,7 +5,7 @@ tokenizer. Defaults: 8,192 tokens, eight layers, width 512.
 Uses RoPE, SwiGLU, and learning-rate warmup with cosine decay.
 Uses MLA with compressed-cache decoding; `--attention mha` selects the baseline.
 
-<img width="1592" height="432" alt="image" src="https://github.com/user-attachments/assets/9775355d-3725-4f5e-a5dd-a38e35248c06" />
+<img width="1372" height="408" alt="image" src="https://github.com/user-attachments/assets/a32af13a-5cbc-4308-bc38-3e2c8bc4a719" />
 
 ## Run
 
