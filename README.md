@@ -18,6 +18,8 @@ keys and values. See [attention implementation notes](docs/research.md).
 
 <img width="1898" height="756" alt="image" src="https://github.com/user-attachments/assets/19cb16ba-d6ec-42fc-a9f6-51e4f3e3fcb1" />
 
+<img width="480" alt="image" src="https://github.com/user-attachments/assets/c562b23d-67be-48a5-92a0-f17739667f35" />
+
 ## Train and generate
 
 Python 3.11+. Training samples **80% fiction and 20% education**. Education
