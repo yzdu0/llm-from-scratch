@@ -82,14 +82,19 @@ def main():
     parser.add_argument("--data", default="data/shakespeare.txt")
     parser.add_argument("--validation-data", help="Separate validation text; otherwise use a 90/10 split")
     parser.add_argument("--vocab-size", type=int, default=8192)
+    parser.add_argument("--architecture", choices=["dense", "deepseek"], default="dense")
+    parser.add_argument("--kv-rank", type=int, default=0, help="MLA latent width; 0 selects half model width")
+    parser.add_argument("--n-experts", type=int, default=4)
+    parser.add_argument("--experts-per-token", type=int, default=2)
+    parser.add_argument("--mtp-weight", type=float, default=0.1, help="DeepSeek-profile second-token loss weight")
     parser.add_argument("--out", default="checkpoints/model.pt")
-    parser.add_argument("--steps", type=int, default=20000)
+    parser.add_argument("--steps", type=int, default=8000)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--context-size", type=int, default=128)
-    parser.add_argument("--n-layers", type=int, default=4)
+    parser.add_argument("--n-layers", type=int, default=8)
     parser.add_argument("--n-heads", type=int, default=4)
-    parser.add_argument("--n-embd", type=int, default=256)
-    parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--n-embd", type=int, default=512)
+    parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--warmup-steps", type=int, help="Defaults to min(200, steps // 10)")
     parser.add_argument("--min-lr-ratio", type=float, default=0.1)
@@ -109,12 +114,19 @@ def main():
     print("Training BPE tokenizer and encoding corpus...", flush=True)
     train, validation, tokenizer = load_data(args.data, args.context_size, args.vocab_size,
                                             args.validation_data)
+    deepseek = args.architecture == "deepseek"
     config = ModelConfig(vocab_size=tokenizer.vocab_size,
                          context_size=args.context_size, n_layers=args.n_layers,
-                         n_heads=args.n_heads, n_embd=args.n_embd, dropout=args.dropout)
+                         n_heads=args.n_heads, n_embd=args.n_embd, dropout=args.dropout,
+                         attention="mla" if deepseek else "mha",
+                         normalization="rmsnorm" if deepseek else "layernorm",
+                         kv_rank=args.kv_rank, n_experts=args.n_experts if deepseek else 0,
+                         experts_per_token=args.experts_per_token,
+                         mtp_weight=args.mtp_weight if deepseek else 0)
     model = LanguageModel(config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    print(f"device={device} parameters={sum(p.numel() for p in model.parameters()):,}", flush=True)
+    print(f"device={device} architecture={args.architecture} "
+          f"parameters={sum(p.numel() for p in model.parameters()):,}", flush=True)
     print(f"vocabulary={tokenizer.vocab_size:,} train_tokens={len(train):,} "
           f"validation_tokens={len(validation):,}", flush=True)
     output = Path(args.out)
@@ -142,6 +154,7 @@ def main():
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
+        model.update_router_bias()
     save_checkpoint(output, model, tokenizer, args.steps, losses["validation"])
     print(f"Saved {output}; best validation={best_loss:.4f}: {best_output}")
 

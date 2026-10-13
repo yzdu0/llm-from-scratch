@@ -32,6 +32,7 @@ def main():
     parser.add_argument("--top-k", type=int, default=40)
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--no-cache", action="store_true", help="Recompute the context each step")
     args = parser.parse_args()
     if not args.prompt:
         parser.error("prompt must be nonempty")
@@ -40,7 +41,7 @@ def main():
     model, tokenizer = load_model(args.checkpoint, device)
     prompt = torch.tensor([tokenizer.encode(args.prompt)], dtype=torch.long, device=device)
     result = model.generate(prompt, args.tokens, args.temperature, args.top_k,
-                            eos_token_id=tokenizer.eos_token_id)
+                            eos_token_id=tokenizer.eos_token_id, use_cache=not args.no_cache)
     print(tokenizer.decode(result[0].tolist(), skip_special_tokens=True))
 
 

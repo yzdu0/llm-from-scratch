@@ -5,6 +5,11 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from .attention import CausalAttention, LatentAttention
+from .experts import MixtureOfExperts
+from .layers import SwiGLU, apply_rope, make_norm
+from .prediction import MultiTokenPrediction
+
 
 @dataclass
 class ModelConfig:
@@ -16,6 +21,16 @@ class ModelConfig:
     dropout: float = 0.1
     position_encoding: str = "rope"
     feed_forward: str = "swiglu"
+    attention: str = "mha"
+    normalization: str = "layernorm"
+    kv_rank: int = 0
+    rope_dim: int = 0
+    n_experts: int = 0
+    experts_per_token: int = 2
+    expert_hidden: int = 0
+    dense_layers: int = 1
+    router_bias_speed: float = 0.001
+    mtp_weight: float = 0.0
 
     def __post_init__(self):
         if min(self.vocab_size, self.context_size, self.n_layers,
@@ -29,80 +44,42 @@ class ModelConfig:
             raise ValueError("position_encoding must be learned or rope")
         if self.feed_forward not in ("gelu", "swiglu"):
             raise ValueError("feed_forward must be gelu or swiglu")
+        if self.attention not in ("mha", "mla") or self.normalization not in ("layernorm", "rmsnorm"):
+            raise ValueError("Invalid attention or normalization")
         if self.position_encoding == "rope" and (self.n_embd // self.n_heads) % 2:
             raise ValueError("RoPE requires an even head dimension")
-
-
-def apply_rope(x, cos, sin):
-    pairs = x.reshape(*x.shape[:-1], -1, 2)
-    first, second = pairs.unbind(dim=-1)
-    cos, sin = cos.to(x.dtype), sin.to(x.dtype)
-    return torch.stack((first * cos - second * sin,
-                        first * sin + second * cos), dim=-1).flatten(-2)
-
-
-class CausalAttention(nn.Module):
-    def __init__(self, config: ModelConfig):
-        super().__init__()
-        self.n_heads = config.n_heads
-        self.use_rope = config.position_encoding == "rope"
-        self.qkv = nn.Linear(config.n_embd, 3 * config.n_embd)
-        self.projection = nn.Linear(config.n_embd, config.n_embd)
-        self.dropout = nn.Dropout(config.dropout)
-        self.register_buffer(
-            "mask", torch.ones(config.context_size, config.context_size,
-                               dtype=torch.bool).tril(), persistent=False
-        )
-        if self.use_rope:
-            head_dim = config.n_embd // config.n_heads
-            frequencies = 10000.0 ** (-torch.arange(0, head_dim, 2).float() / head_dim)
-            angles = torch.arange(config.context_size).float()[:, None] * frequencies
-            self.register_buffer("rope_cos", angles.cos(), persistent=False)
-            self.register_buffer("rope_sin", angles.sin(), persistent=False)
-
-    def forward(self, x):
-        batch, length, width = x.shape
-        q, k, v = self.qkv(x).chunk(3, dim=-1)
-        q, k, v = [t.view(batch, length, self.n_heads, width // self.n_heads)
-                   .transpose(1, 2) for t in (q, k, v)]
-        if self.use_rope:
-            q = apply_rope(q, self.rope_cos[:length], self.rope_sin[:length])
-            k = apply_rope(k, self.rope_cos[:length], self.rope_sin[:length])
-        scores = (q @ k.transpose(-2, -1)) / math.sqrt(q.size(-1))
-        scores = scores.masked_fill(~self.mask[:length, :length], float("-inf"))
-        weights = self.dropout(F.softmax(scores, dim=-1))
-        output = (weights @ v).transpose(1, 2).contiguous().view(batch, length, width)
-        return self.dropout(self.projection(output))
-
-
-class SwiGLU(nn.Module):
-    def __init__(self, config: ModelConfig):
-        super().__init__()
-        # Three projections at 8/3 width keep the budget near a 4x GELU MLP.
-        hidden = math.ceil((8 * config.n_embd / 3) / 8) * 8
-        self.gate = nn.Linear(config.n_embd, hidden, bias=False)
-        self.up = nn.Linear(config.n_embd, hidden, bias=False)
-        self.down = nn.Linear(hidden, config.n_embd, bias=False)
-        self.dropout = nn.Dropout(config.dropout)
-
-    def forward(self, x):
-        return self.dropout(self.down(F.silu(self.gate(x)) * self.up(x)))
+        if min(self.kv_rank, self.rope_dim, self.n_experts, self.expert_hidden, self.dense_layers) < 0:
+            raise ValueError("Ranks, expert counts, and dimensions must be nonnegative")
+        if self.rope_dim % 2 or (self.attention == "mla" and self.position_encoding != "rope"):
+            raise ValueError("MLA requires RoPE with an even rotary dimension")
+        if self.n_experts and (not 1 <= self.experts_per_token <= self.n_experts
+                               or self.feed_forward != "swiglu"):
+            raise ValueError("MoE requires SwiGLU and 1 <= experts_per_token <= n_experts")
+        if (not math.isfinite(self.mtp_weight) or self.mtp_weight < 0
+                or not math.isfinite(self.router_bias_speed) or self.router_bias_speed < 0):
+            raise ValueError("Auxiliary weight and routing speed must be finite and nonnegative")
 
 
 class Block(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config, use_experts=False):
         super().__init__()
-        self.ln_attention = nn.LayerNorm(config.n_embd)
-        self.attention = CausalAttention(config)
-        self.ln_mlp = nn.LayerNorm(config.n_embd)
-        self.mlp = SwiGLU(config) if config.feed_forward == "swiglu" else nn.Sequential(
-            nn.Linear(config.n_embd, 4 * config.n_embd), nn.GELU(),
-            nn.Linear(4 * config.n_embd, config.n_embd), nn.Dropout(config.dropout)
-        )
+        self.ln_attention = make_norm(config)
+        self.attention = LatentAttention(config) if config.attention == "mla" else CausalAttention(config)
+        self.ln_mlp = make_norm(config)
+        if use_experts:
+            self.mlp = MixtureOfExperts(config)
+        elif config.feed_forward == "swiglu":
+            self.mlp = SwiGLU(config)
+        else:
+            self.mlp = nn.Sequential(
+                nn.Linear(config.n_embd, 4 * config.n_embd), nn.GELU(),
+                nn.Linear(4 * config.n_embd, config.n_embd), nn.Dropout(config.dropout)
+            )
 
-    def forward(self, x):
-        x = x + self.attention(self.ln_attention(x))
-        return x + self.mlp(self.ln_mlp(x))
+    def forward(self, x, cache=None):
+        attended, cache = self.attention(self.ln_attention(x), cache)
+        x = x + attended
+        return x + self.mlp(self.ln_mlp(x)), cache
 
 
 class LanguageModel(nn.Module):
@@ -113,9 +90,12 @@ class LanguageModel(nn.Module):
         self.position_embedding = (nn.Embedding(config.context_size, config.n_embd)
                                    if config.position_encoding == "learned" else None)
         self.dropout = nn.Dropout(config.dropout)
-        self.blocks = nn.Sequential(*(Block(config) for _ in range(config.n_layers)))
-        self.ln_final = nn.LayerNorm(config.n_embd)
+        self.blocks = nn.ModuleList(Block(config, bool(config.n_experts and i >= config.dense_layers))
+                                    for i in range(config.n_layers))
+        self.ln_final = make_norm(config)
         self.head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.mtp = MultiTokenPrediction(config, Block(config)) if config.mtp_weight else None
+        self.loss_components = {}
         self.apply(self._init_weights)
         self.head.weight = self.token_embedding.weight
 
@@ -126,22 +106,51 @@ class LanguageModel(nn.Module):
             if isinstance(module, nn.Linear) and module.bias is not None:
                 nn.init.zeros_(module.bias)
 
-    def forward(self, tokens, targets=None):
-        if tokens.ndim != 2 or not 1 <= tokens.size(1) <= self.config.context_size:
+    def forward(self, tokens, targets=None, cache=None, use_cache=False):
+        if cache is not None and (not use_cache or len(cache) != len(self.blocks)):
+            raise ValueError("Pass one cache per block with use_cache=True")
+        start = 0 if cache is None else cache[0][0].size(-2)
+        if (tokens.ndim != 2 or tokens.size(1) < 1
+                or tokens.size(1) + start > self.config.context_size):
             raise ValueError("tokens must have shape (batch, length) within context_size")
-        positions = torch.arange(tokens.size(1), device=tokens.device)
+        if use_cache and (self.training or targets is not None):
+            raise ValueError("Caching is for evaluation without targets")
+        positions = torch.arange(start, start + tokens.size(1), device=tokens.device)
         x = self.token_embedding(tokens)
         if self.position_embedding is not None:
             x = x + self.position_embedding(positions)
         x = self.dropout(x)
-        logits = self.head(self.ln_final(self.blocks(x)))
-        loss = None if targets is None else F.cross_entropy(
-            logits.reshape(-1, self.config.vocab_size), targets.reshape(-1)
-        )
-        return logits, loss
+        next_cache = []
+        for i, block in enumerate(self.blocks):
+            x, layer_cache = block(x, None if cache is None else cache[i])
+            if use_cache:
+                next_cache.append(layer_cache)
+        logits = self.head(self.ln_final(x))
+        loss = None
+        self.loss_components = {}
+        if targets is not None:
+            if targets.shape != tokens.shape:
+                raise ValueError("targets must have the same shape as tokens")
+            loss = F.cross_entropy(logits.reshape(-1, self.config.vocab_size), targets.reshape(-1))
+            self.loss_components["next_token"] = loss.detach()
+            if self.training and self.mtp is not None and tokens.size(1) > 1:
+                predicted = self.mtp(x[:, :-1], self.token_embedding(targets[:, :-1]))
+                mtp_loss = F.cross_entropy(self.head(predicted).reshape(-1, self.config.vocab_size),
+                                           targets[:, 1:].reshape(-1))
+                self.loss_components["mtp"] = mtp_loss.detach()
+                loss = loss + self.config.mtp_weight * mtp_loss
+        return (logits, loss, next_cache) if use_cache else (logits, loss)
 
     @torch.no_grad()
-    def generate(self, tokens, max_new_tokens=100, temperature=0.8, top_k=40, eos_token_id=None):
+    def update_router_bias(self):
+        if self.training:
+            for module in self.modules():
+                if isinstance(module, MixtureOfExperts):
+                    module.update_bias(self.config.router_bias_speed)
+
+    @torch.no_grad()
+    def generate(self, tokens, max_new_tokens=100, temperature=0.8, top_k=40,
+                 eos_token_id=None, use_cache=True):
         if max_new_tokens < 0 or not math.isfinite(temperature) or temperature < 0:
             raise ValueError("max_new_tokens and temperature must be nonnegative and finite")
         if top_k is not None and top_k < 1:
@@ -151,9 +160,16 @@ class LanguageModel(nn.Module):
         was_training = self.training
         self.eval()
         finished = torch.zeros(tokens.size(0), dtype=torch.bool, device=tokens.device)
+        cache = None
         try:
             for _ in range(max_new_tokens):
-                logits, _ = self(tokens[:, -self.config.context_size:])
+                if use_cache:
+                    if cache is None or cache[0][0].size(-2) >= self.config.context_size:
+                        logits, _, cache = self(tokens[:, -self.config.context_size:], use_cache=True)
+                    else:
+                        logits, _, cache = self(tokens[:, -1:], cache=cache, use_cache=True)
+                else:
+                    logits, _ = self(tokens[:, -self.config.context_size:])
                 logits = logits[:, -1, :]
                 if temperature == 0:
                     next_token = logits.argmax(dim=-1, keepdim=True)
@@ -167,7 +183,7 @@ class LanguageModel(nn.Module):
                     next_token[finished] = eos_token_id
                     finished |= next_token.squeeze(-1) == eos_token_id
                 tokens = torch.cat((tokens, next_token), dim=1)
-                if finished.all():
+                if eos_token_id is not None and finished.all():
                     break
         finally:
             self.train(was_training)
