@@ -1,9 +1,22 @@
 # LLM
 
-A minimal language model trained from scratch with PyTorch and a trained BPE
-tokenizer. Defaults: 8,192 tokens, eight layers, width 512.
-Uses RoPE, SwiGLU, and learning-rate warmup with cosine decay.
-Uses MLA with compressed-cache decoding; `--attention mha` selects the baseline.
+A (small) large language model trained from scratch with PyTorch and a trained BPE
+tokenizer. Training takes ~2 hours for 8000 steps on M4 MacBook. 
+
+| Property | Current value |
+|---|---|
+| Trainable parameters | **29,152,256** |
+| Transformer layers | 8 |
+| Model width | 512 |
+| Attention heads | 4 per layer |
+| Attention type | Multi-Head Latent Attention (MLA) |
+| Compressed KV width | 256 |
+| Position encoding | RoPE |
+| Feed-forward network | SwiGLU, hidden width 1,368 |
+| Vocabulary | 8,192 byte-level BPE tokens |
+| Context window | **512 tokens** |
+| Dropout | 15% |
+| Output weights | Shared with token embeddings |
 
 <img width="1372" height="408" alt="image" src="https://github.com/user-attachments/assets/a32af13a-5cbc-4308-bc38-3e2c8bc4a719" />
 
