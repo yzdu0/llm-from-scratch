@@ -12,7 +12,11 @@ def load_model(path, device="cpu"):
     if "tokenizer" not in checkpoint:
         raise ValueError("Checkpoint has no BPE tokenizer. Retrain with python -m llm.train.")
     tokenizer = BPETokenizer.from_json(checkpoint["tokenizer"])
-    model = LanguageModel(ModelConfig(**checkpoint["config"]))
+    config = dict(checkpoint["config"])
+    # Checkpoints predating these fields used learned positions and GELU.
+    config.setdefault("position_encoding", "learned")
+    config.setdefault("feed_forward", "gelu")
+    model = LanguageModel(ModelConfig(**config))
     if model.config.vocab_size != tokenizer.vocab_size:
         raise ValueError("Checkpoint model and tokenizer vocabulary sizes do not match")
     model.load_state_dict(checkpoint["model"])
@@ -35,8 +39,9 @@ def main():
     device = choose_device() if args.device == "auto" else args.device
     model, tokenizer = load_model(args.checkpoint, device)
     prompt = torch.tensor([tokenizer.encode(args.prompt)], dtype=torch.long, device=device)
-    result = model.generate(prompt, args.tokens, args.temperature, args.top_k)
-    print(tokenizer.decode(result[0].tolist()))
+    result = model.generate(prompt, args.tokens, args.temperature, args.top_k,
+                            eos_token_id=tokenizer.eos_token_id)
+    print(tokenizer.decode(result[0].tolist(), skip_special_tokens=True))
 
 
 if __name__ == "__main__":
