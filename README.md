@@ -18,7 +18,7 @@ tokenizer. Training takes ~2 hours for 8000 steps on M4 MacBook.
 | Dropout | 15% |
 | Output weights | Shared with token embeddings |
 
-<img width="1372" height="408" alt="image" src="https://github.com/user-attachments/assets/a32af13a-5cbc-4308-bc38-3e2c8bc4a719" />
+<img width="1898" height="756" alt="image" src="https://github.com/user-attachments/assets/19cb16ba-d6ec-42fc-a9f6-51e4f3e3fcb1" />
 
 ## Run
 
