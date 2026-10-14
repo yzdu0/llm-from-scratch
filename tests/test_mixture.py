@@ -6,15 +6,14 @@ from unittest.mock import patch
 
 import torch
 
-from llm.book_catalog import BALANCED_BOOKS
-from llm.prepare import BALANCED_WEIGHTS, BOOKS, prepare_balanced
+from llm.book_catalog import FICTION_BOOKS, EDUCATION_BOOKS
 from llm.tokenizer import BPETokenizer, EOS_TOKEN
 from llm.train import WeightedData, get_batch, load_mixture
 
 
 class MixtureTests(unittest.TestCase):
     def test_balanced_sampling_matches_shares_and_keeps_windows_in_one_source(self):
-        weights = dict(zip(("fiction", "education", "maths_books"), (.8, .1, .1)))
+        weights = dict(zip(("fiction", "education"), (.8, .2)))
         sources = {name: torch.full((40,), index) for index, name in enumerate(weights)}
         data = WeightedData(sources, weights)
         x, y = get_batch(data, 10000, 8, "cpu", torch.Generator().manual_seed(42))
@@ -34,11 +33,11 @@ class MixtureTests(unittest.TestCase):
             root = Path(directory)
             sources = []
             expected_training = []
-            for index, name in enumerate(("fiction", "education", "maths_books")):
+            for index, name in enumerate(("fiction", "education")):
                 train, valid = root / f"{name}.txt", root / f"{name}-valid.txt"
                 train.write_text((f"Training source {index}.\n{EOS_TOKEN}\n") * 10)
                 valid.write_text((f"Validation source {index}.\n{EOS_TOKEN}\n") * 10)
-                sources.append({"name": name, "weight": 1 / 3, "train": train.name, "validation": valid.name})
+                sources.append({"name": name, "weight": .5, "train": train.name, "validation": valid.name})
                 expected_training.append(train.resolve())
             manifest = root / "mixture.json"
             manifest.write_text(json.dumps({"sources": sources}))
@@ -54,25 +53,14 @@ class MixtureTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_mixture(manifest, 8, 300, root / "cache")
 
-    def test_balanced_preparation_retains_fiction_and_publishes_requested_weights(self):
-        with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / "balanced.txt"
-            with patch("llm.prepare.prepare_books") as prepare:
-                prepare_balanced(output)
-            self.assertEqual(prepare.call_args_list[0].args, (output.parent / "books.txt",))
-            manifest = json.loads(output.with_suffix(".json").read_text())
-            self.assertEqual({source["name"]: source["weight"] for source in manifest["sources"]}, BALANCED_WEIGHTS)
-            self.assertAlmostEqual(manifest["education_total"], .2)
-            self.assertAlmostEqual(manifest["maths_total"], .1)
-            self.assertEqual(len(prepare.call_args_list), 3)
 
     def test_catalogs_have_unique_editions_and_keep_original_fiction_held_out(self):
-        entries = list(BOOKS) + [book for catalog in BALANCED_BOOKS.values() for book in catalog]
+        entries = list(FICTION_BOOKS) + list(EDUCATION_BOOKS)
         ids = [entry[0] for entry in entries]
         self.assertEqual(len(ids), len(set(ids)))
-        self.assertGreaterEqual(len(BOOKS), 100)
+        self.assertGreaterEqual(len(FICTION_BOOKS), 100)
         original = {209: "validation", 5230: "validation", 105: "validation", 345: "train", 84: "train"}
-        current = {book[0]: book[3] for book in BOOKS}
+        current = {book[0]: book[3] for book in FICTION_BOOKS}
         for ebook, split in original.items():
             self.assertEqual(current[ebook], split)
 

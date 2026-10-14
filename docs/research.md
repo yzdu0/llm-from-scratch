@@ -1,21 +1,22 @@
-# Multi-Head Latent Attention
+# Attention implementation
 
-MLA follows [DeepSeek-V2](https://arxiv.org/abs/2405.04434) and
-[DeepSeek-V3](https://arxiv.org/abs/2412.19437):
-low-rank query and joint KV projections, decoupled RoPE, and absorbed key/value
-projections. Only the KV latent and shared rotary key are cached.
+The model uses Multi-Head Latent Attention (MLA): low-rank query and joint KV
+projections, decoupled RoPE, and absorbed key/value projections. Generation caches
+only the KV latent and shared rotary key, without reconstructing full per-token
+keys and values.
 
-Training defaults to `--attention mla`; use `--attention mha` for the baseline.
-`--kv-rank` controls latent width (default: half model width).
-The transformer keeps its existing LayerNorm and dense SwiGLU layers;
-RMSNorm is used only inside MLA's compressed projections.
+At width 384 with four heads, each block caches 192 latent scalars and 48 rotary
+scalars per token. LayerNorm surrounds the attention and dense SwiGLU blocks;
+RMSNorm normalizes MLA's compressed projections. Input embeddings and output
+weights are shared.
 
-At width 512 with four heads, MLA caches 320 scalars per token per block versus 1,024 for MHA.
-Cached and uncached greedy generation are tested for equivalence, including
-sliding-window rollover. `--no-cache` disables caching.
+Tests compare absorbed attention against explicitly expanded projections and
+verify cached/uncached greedy generation, including sliding-window rollover.
+`--no-cache` disables generation caching. These checks establish implementation
+correctness; generation quality depends on training and evaluation.
 
-Fresh training is required to switch attention types. Earlier dense checkpoints
-remain loadable; incompatible architectures must be retrained.
-Tests verify correctness, not improved generation quality or runtime speed.
+## References
 
-Reference: [DeepSeek's official attention implementation](https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py).
+- [DeepSeek-V2](https://arxiv.org/abs/2405.04434)
+- [DeepSeek-V3](https://arxiv.org/abs/2412.19437)
+- [DeepSeek attention implementation](https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py)

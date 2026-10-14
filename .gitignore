@@ -9,3 +9,6 @@ data/*-sources/
 data/token-cache/
 checkpoints/*.train.log
 checkpoints/*.pid
+data/*.jsonl
+data/*.jsonl.part
+data/*.log

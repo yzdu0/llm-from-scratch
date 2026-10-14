@@ -1,17 +1,33 @@
-# Corpora
+# Corpus
 
-Only two training recipes are maintained:
+The prepared training pool contains **99,992,938 tokens**:
 
-- **80% fiction / 20% education:** `python -m llm.prepare --corpus balanced`.
-  `balanced.json` samples `books.txt` at 80%, `balanced-education.txt` at 10%,
-  and `balanced-maths_books.txt` at 10%, each with its matching `-valid.txt`.
-  All 115 fiction works remain included. Original Gutenberg files and licenses
-  live in `books-sources/`; category JSON files retain provenance and whole-book splits.
-- **GPT-4 TinyStories:** `python -m llm.prepare --corpus tinystories --all-stories`.
-  `tinystories-gpt4.txt` and `tinystories-gpt4-valid.txt` use the official GPT-4-only
-  splits. Metadata records URLs, CDLA-Sharing-1.0 licensing, and story counts.
+- Fiction: 79,993,024 tokens of English Gutenberg books.
+- Education: 19,999,914 tokens of literature and criticism, humanities, history,
+  science books, and educational web prose from FineWeb-Edu.
 
-Prepared text, metadata and token caches are ignored by Git. The shared BPE
-vocabulary learns only from training files. `token-cache/` stores compact arrays
-for disk-backed sampling. See [books](../docs/balanced.md) and
-[GPT-4 TinyStories](../docs/tinystories.md) for training commands.
+Validation contains a separate 5,133,965 tokens. Q&A uses short conversations
+from Smol-SmolTalk: 6,485 training examples and 330 validation examples.
+
+```sh
+python -m llm.prepare
+```
+
+`expanded.json` describes the 80/20 training mixture. `expanded-fiction.txt` and
+`expanded-education.txt` have matching `-valid.txt` files. `expanded-tokenizer.json`
+holds the frozen vocabulary used to count and train on the pool.
+`instruction.jsonl` and `instruction-valid.jsonl` contain Q&A pairs.
+
+`books.txt` and `education-books.txt`, with their validation files, are preparation
+inputs built from the seed catalogs in `llm/book_catalog.py`. Source downloads,
+licenses and provenance are retained in the `*-sources/` directories and JSON
+metadata. `token-cache/` contains disk-backed arrays. Generated data is ignored by Git.
+
+Whole books and web documents are held out by content hash; seed-book splits are
+specified in the catalog. Exact normalized document duplicates are omitted, and
+normalized questions cannot cross the Q&A split. Training candidates alone teach
+BPE merges; complete documents are selected for the 100M-token pool. Shared
+quotations and overlapping editions can occur across otherwise distinct works.
+
+Gutenberg files retain their source licenses. FineWeb-Edu has an ODC-BY database
+license; source pages retain their own rights. Smol-SmolTalk uses Apache-2.0.
