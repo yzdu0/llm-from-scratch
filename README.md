@@ -1,7 +1,6 @@
 # LLM
 
-A small language model trained from scratch with PyTorch and byte-level BPE.
-The pipeline produces separate raw and Q&A-tuned checkpoints.
+A (small) large language model trained from scratch with PyTorch
 
 | Model | Configuration |
 |---|---|
@@ -12,11 +11,13 @@ The pipeline produces separate raw and Q&A-tuned checkpoints.
 | Vocabulary / context | 16,384 tokens / 512 tokens |
 | Regularization | Dropout 0, weight decay 0.1 |
 
-The corpus contains **199,999,185 training tokens**: **70% fiction / 30% education**.
+The training data contains **199,999,185 training tokens**: **70% fiction / 30% education**.
 Fiction includes novels and 424 short-story collections. Education includes 105
 essay books,
 literature and criticism, humanities, history, and science.
 Q&A fine-tuning uses 6,485 training examples and 330 validation examples.
+
+<img width="1930" height="870" alt="image" src="https://github.com/user-attachments/assets/624e0eac-2c67-41a0-85ec-e68ed295aa09" />
 
 ## Run
 
