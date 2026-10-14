@@ -11,7 +11,7 @@ from .train import choose_device
 
 def main():
     parser = argparse.ArgumentParser(description="Generate text from a trained checkpoint")
-    parser.add_argument("--checkpoint", default="checkpoints/books-100m-16l.raw.best.pt")
+    parser.add_argument("--checkpoint", default="checkpoints/books-200m-16l-16k.raw.best.pt")
     prompts = parser.add_mutually_exclusive_group()
     prompts.add_argument("--prompt", default="The ")
     prompts.add_argument("--question", help="Question for an instruction-tuned checkpoint; print answer only")

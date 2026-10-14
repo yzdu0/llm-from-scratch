@@ -4,11 +4,17 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from llm.prepare import prepare_books
+from llm.prepare import prepare_books, varied_fiction
 from llm.tokenizer import EOS_TOKEN
 
 
 class PreparationTests(unittest.TestCase):
+    def test_short_story_collections_are_interleaved_without_repetition(self):
+        rows=[{'Text#': str(i), 'Subjects': 'Short stories' if i < 3 else 'Adventure fiction'} for i in range(9)]
+        ordered=list(varied_fiction(rows))
+        self.assertEqual([r['Text#'] for r in ordered],['0','3','4','1','5','6','2','7','8'])
+        self.assertEqual(len({r['Text#'] for r in ordered}),len(rows))
+
     def test_books_corpus_keeps_whole_validation_works_separate(self):
         catalog = ((1, "Dark training novel", "Author A", "train"),
                    (2, "Held-out novel", "Author B", "validation"))

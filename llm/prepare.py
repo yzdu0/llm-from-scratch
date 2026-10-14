@@ -1,4 +1,4 @@
-"""Prepare the 100M-token fiction/education corpus and Q&A data."""
+"""Prepare the 200M-token fiction/education corpus and Q&A data."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -11,9 +11,13 @@ import shutil
 from urllib.request import urlopen
 
 from .book_catalog import FICTION_BOOKS, EDUCATION_BOOKS
-from .tokenizer import BPETokenizer, EOS_TOKEN
+from .tokenizer import BPETokenizer, EOS_TOKEN, DEFAULT_VOCAB_SIZE
 from .instruction import question_key
 
+
+DEFAULT_TRAIN_TOKENS = 200_000_000
+FICTION_SHARE = .7
+EDUCATION_SHARE = .3
 
 def prepare_books(output, catalog=None):
     """Build a books-only corpus, keeping whole held-out works out of training."""
@@ -128,15 +132,33 @@ def fiction_candidates(catalog, excluded_ids, excluded_titles):
         yield row
 
 
-def prepare_fiction(root, tokenizer, target):
+def varied_fiction(rows):
+    """Interleave one short-story collection with two other fiction works."""
+    rows=list(rows)
+    short=iter(r for r in rows if re.search(r'short stories', r['Subjects'], re.I))
+    other=iter(r for r in rows if not re.search(r'short stories', r['Subjects'], re.I))
+    while True:
+        batch=[next(short,None),next(other,None),next(other,None)]
+        if not any(batch): return
+        yield from (row for row in batch if row is not None)
+
+
+def prepare_fiction(root, tokenizer, target, essays=False):
     catalog = root/'expanded-sources/pg_catalog.csv'; download(CATALOG_URL, catalog)
-    base_paths = [root/'books.txt', root/'books-valid.txt']
+    stem = 'education-books' if essays else 'books'
+    base_paths = [root/f'{stem}.txt', root/f'{stem}-valid.txt']
     counts = {'train_tokens':token_count(base_paths[0],tokenizer),'validation_tokens':token_count(base_paths[1],tokenizer)}
     known = {digest(text) for p in base_paths for text in p.read_text().split(EOS_TOKEN) if text.strip()}
     entries = list(FICTION_BOOKS) + list(EDUCATION_BOOKS)
     ids, titles = {b[0] for b in entries}, {title_key(b[1]) for b in entries}
+    if essays and (root/'expanded-fiction.json').exists():
+        fiction_books=json.loads((root/'expanded-fiction.json').read_text())['books']
+        ids.update(book['ebook'] for book in fiction_books)
+        titles.update(title_key(book['title']) for book in fiction_books)
+        known.update(book['sha256'] for book in fiction_books)
     records, failures = [], []
-    paths = [root/'expanded-fiction.txt', root/'expanded-fiction-valid.txt']
+    name = 'essays' if essays else 'fiction'
+    paths = [root/f'expanded-{name}.txt', root/f'expanded-{name}-valid.txt']
     pending = [p.with_suffix('.txt.part') for p in paths]
     def fetch(row):
         ebook=int(row['Text#']); url=f'https://www.gutenberg.org/ebooks/{ebook}.txt.utf-8'
@@ -154,7 +176,13 @@ def prepare_fiction(root, tokenizer, target):
             for source,destination in zip(base_paths,streams):
                 with source.open(encoding='utf-8') as incoming: shutil.copyfileobj(incoming,destination)
             with catalog.open(encoding='utf-8-sig',newline='') as incoming, ThreadPoolExecutor(max_workers=4) as pool:
-                rows=iter(fiction_candidates(csv.DictReader(incoming),ids,titles))
+                catalog_rows=list(csv.DictReader(incoming))
+                if essays:
+                    rows=iter(r for r in catalog_rows if r['Type']=='Text' and r['Language']=='en'
+                              and re.search(r'\bessays\b',r['Subjects'],re.I)
+                              and int(r['Text#']) not in ids and title_key(r['Title']) not in titles)
+                else:
+                    rows=iter(varied_fiction(fiction_candidates(catalog_rows,ids,titles)))
                 while counts['train_tokens']<target:
                     batch=[]
                     for _ in range(16):
@@ -163,7 +191,7 @@ def prepare_fiction(root, tokenizer, target):
                         key=title_key(row['Title'])
                         if key in titles: continue
                         titles.add(key);batch.append(row)
-                    if not batch: raise ValueError('Not enough eligible fiction in the catalog')
+                    if not batch: raise ValueError(f'Not enough eligible {name} in the catalog')
                     for row,text,url,error in pool.map(fetch,batch):
                         if error: failures.append(dict(ebook=row['Text#'],error=error));continue
                         identity=digest(text)
@@ -174,12 +202,12 @@ def prepare_fiction(root, tokenizer, target):
                         counts[split+'_tokens']+=len(tokenizer.encode(document))
                         records.append(dict(ebook=int(row['Text#']),title=row['Title'],authors=row['Authors'],
                                             subjects=row['Subjects'],url=url,sha256=identity,split=split))
-                    print(f"Fiction: {counts['train_tokens']:,} tokens; {len(records)} added books",flush=True)
+                    print(f"{name.title()}: {counts['train_tokens']:,} tokens; {len(records)} added books",flush=True)
         for source,target_path in zip(pending,paths): source.replace(target_path)
     finally:
         for p in pending:p.unlink(missing_ok=True)
-    (root/'expanded-fiction.json').write_text(json.dumps(dict(**counts,books=records,skipped=failures,
-        seed_books='books.json',catalog=CATALOG_URL,rights='Original Gutenberg files and licenses retained in expanded-sources/books'),indent=2)+'\n')
+    (root/f'expanded-{name}.json').write_text(json.dumps(dict(**counts,books=records,skipped=failures,
+        seed_books=f'{stem}.json',catalog=CATALOG_URL,rights='Original Gutenberg files and licenses retained in expanded-sources/books'),indent=2)+'\n')
     return counts
 
 
@@ -204,7 +232,7 @@ def prepare_education(root,tokenizer,target):
         with ExitStack() as stack:
             streams=[stack.enter_context(p.open('w',encoding='utf-8')) for p in pending]
             audit=stack.enter_context((root/'expanded-sources/education-attribution.jsonl').open('w',encoding='utf-8'))
-            for stem in ['education-books']:
+            for stem in ['expanded-essays']:
                 for index,suffix in enumerate(['.txt','-valid.txt']):
                     p=root/(stem+suffix)
                     counts[('train','validation')[index]+'_tokens']+=token_count(p,tokenizer)
@@ -225,7 +253,7 @@ def prepare_education(root,tokenizer,target):
         for p in pending:p.unlink(missing_ok=True)
     (root/'expanded-education.json').write_text(json.dumps(dict(**counts,source=EDUCATION_URL,
         license='ODC-BY database; original web pages retain their own rights',
-        seed_books=['education-books.json'],
+        seed_books=['education-books.json'],essays='expanded-essays.json',
         attribution='expanded-sources/education-attribution.jsonl'),indent=2)+'\n')
     return counts
 
@@ -294,14 +322,14 @@ def trim_training_pool(path, tokenizer, target):
     return count,kept
 
 
-def finalize_pool(root, tokens=100000000):
+def finalize_pool(root, tokens=DEFAULT_TRAIN_TOKENS, vocab_size=DEFAULT_VOCAB_SIZE):
     fiction={k:v for k,v in json.loads((root/'expanded-fiction.json').read_text()).items() if k.endswith('_tokens')}
     education={k:v for k,v in json.loads((root/'expanded-education.json').read_text()).items() if k.endswith('_tokens')}
     # Learn the final vocabulary from training candidates, never validation.
     # Freeze it before selecting the final pool so recorded counts remain exact.
-    tokenizer=BPETokenizer.train_file([root/'expanded-fiction.txt',root/'expanded-education.txt'])
+    tokenizer=BPETokenizer.train_file([root/'expanded-fiction.txt',root/'expanded-education.txt'],vocab_size)
     final={}
-    for name,share in [('fiction',.8),('education',.2)]:
+    for name,share in [('fiction',FICTION_SHARE),('education',EDUCATION_SHARE)]:
         count,kept=trim_training_pool(root/f'expanded-{name}.txt',tokenizer,int(tokens*share))
         final[name]=count
         provenance=root/f'expanded-{name}.json'
@@ -312,11 +340,11 @@ def finalize_pool(root, tokens=100000000):
         provenance.write_text(json.dumps(info,indent=2)+'\n')
     (root/'expanded-tokenizer.json').write_text(tokenizer.to_json())
     print(f'Final training pool: {sum(final.values()):,} tokens; {final}',flush=True)
-    manifest=dict(dataset='Expanded 80% fiction / 20% education',min_tokens=int(tokens*.99),max_tokens=int(tokens*1.01),
-                  target_tokens=tokens,train_tokens=sum(final.values()),source_tokens=final,tokenizer='expanded-tokenizer.json',
+    manifest=dict(dataset='70% fiction / 30% education',min_tokens=int(tokens*.99),max_tokens=int(tokens*1.01),
+                  target_tokens=tokens,vocab_size=tokenizer.vocab_size,train_tokens=sum(final.values()),source_tokens=final,tokenizer='expanded-tokenizer.json',
                   bootstrap_counts=dict(fiction=fiction,education=education),sources=[
                       dict(name=name,weight=weight,train=f'expanded-{name}.txt',validation=f'expanded-{name}-valid.txt',provenance=f'expanded-{name}.json')
-                      for name,weight in [('fiction',.8),('education',.2)]])
+                      for name,weight in [('fiction',FICTION_SHARE),('education',EDUCATION_SHARE)]])
     (root/'expanded.json').write_text(json.dumps(manifest,indent=2)+'\n')
 
 
@@ -324,20 +352,22 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-dir',default='data')
     parser.add_argument('--only',choices=['both','corpus','qa'],default='both')
-    parser.add_argument('--tokens',type=int,default=100000000,help='Final unique training-token target (80/20)')
+    parser.add_argument('--vocab-size',type=int,default=DEFAULT_VOCAB_SIZE)
+    parser.add_argument('--tokens',type=int,default=DEFAULT_TRAIN_TOKENS,help='Final unique training-token target (70/30)')
     args=parser.parse_args();root=Path(args.data_dir);root.mkdir(parents=True,exist_ok=True)
     if args.tokens<1:parser.error('Token targets must be positive')
     if args.only in ('both','corpus'):
         if not all((root/name).exists() for name in ('books.txt','books-valid.txt','education-books.txt','education-books-valid.txt')):
             prepare_seed_books(root)
         token_path=root/'expanded-sources/bootstrap-tokenizer.json';token_path.parent.mkdir(exist_ok=True)
-        if token_path.exists():tokenizer=BPETokenizer.from_json(token_path.read_text())
-        else:
-            tokenizer=BPETokenizer.train_file([root/'books.txt',root/'education-books.txt'])
+        tokenizer=BPETokenizer.from_json(token_path.read_text()) if token_path.exists() else None
+        if tokenizer is None or tokenizer.vocab_size != args.vocab_size:
+            tokenizer=BPETokenizer.train_file([root/'books.txt',root/'education-books.txt'],args.vocab_size)
             token_path.write_text(tokenizer.to_json())
-        fiction=prepare_fiction(root,tokenizer,int(args.tokens*.85))
-        education=prepare_education(root,tokenizer,int(args.tokens*.24))
-        finalize_pool(root,args.tokens)
+        fiction=prepare_fiction(root,tokenizer,int(args.tokens*FICTION_SHARE*1.15))
+        prepare_fiction(root,tokenizer,int(args.tokens*.06),essays=True)
+        education=prepare_education(root,tokenizer,int(args.tokens*EDUCATION_SHARE*1.2))
+        finalize_pool(root,args.tokens,args.vocab_size)
     if args.only in ('both','qa'):prepare_qa(root)
 
 

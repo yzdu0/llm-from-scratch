@@ -1,6 +1,7 @@
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
 EOS_TOKEN = "<|endoftext|>"
+DEFAULT_VOCAB_SIZE = 16384
 
 class BPETokenizer:
     """Learn subword merges with a byte alphabet for unseen Unicode text."""
@@ -9,7 +10,7 @@ class BPETokenizer:
         self.tokenizer = tokenizer
 
     @classmethod
-    def train(cls, text: str, vocab_size: int = 8192):
+    def train(cls, text: str, vocab_size: int = DEFAULT_VOCAB_SIZE):
         special_tokens = [EOS_TOKEN] if EOS_TOKEN in text else []
         if not text or vocab_size < 256 + len(special_tokens):
             raise ValueError("BPE needs nonempty text and room for 256 bytes plus special tokens")
@@ -29,7 +30,7 @@ class BPETokenizer:
         return cls(Tokenizer.from_str(value))
 
     @classmethod
-    def train_file(cls, path, vocab_size=8192):
+    def train_file(cls, path, vocab_size=DEFAULT_VOCAB_SIZE):
         """Train from a file without materializing the corpus as a Python string."""
         if vocab_size < 257:
             raise ValueError("File BPE needs room for 256 bytes and EOS")

@@ -13,7 +13,7 @@ import numpy as np
 from .checkpoint import load_model
 from .instruction import InstructionData, load_instruction_data
 from .model import LanguageModel, ModelConfig
-from .tokenizer import BPETokenizer
+from .tokenizer import BPETokenizer, DEFAULT_VOCAB_SIZE
 
 
 def choose_device():
@@ -22,7 +22,7 @@ def choose_device():
     return "mps" if torch.backends.mps.is_available() else "cpu"
 
 
-def load_data(path, context_size, vocab_size=8192, validation_path=None, tokenizer=None):
+def load_data(path, context_size, vocab_size=DEFAULT_VOCAB_SIZE, validation_path=None, tokenizer=None):
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Corpus not found: {path}. Run python -m llm.prepare first.")
@@ -42,7 +42,7 @@ def load_data(path, context_size, vocab_size=8192, validation_path=None, tokeniz
     return train, validation, tokenizer
 
 
-def load_cached_data(path, context_size, vocab_size=8192, validation_path=None,
+def load_cached_data(path, context_size, vocab_size=DEFAULT_VOCAB_SIZE, validation_path=None,
                      cache_dir="data/token-cache", tokenizer=None):
     """Encode corpus pairs into disk-backed tokens."""
     if validation_path is None:
@@ -109,7 +109,7 @@ def load_cached_files(paths, context_size, vocab_size, cache_dir, tokenizer=None
     return splits, tokenizer
 
 
-def load_mixture(path, context_size, vocab_size=8192, cache_dir="data/token-cache", tokenizer=None):
+def load_mixture(path, context_size, vocab_size=DEFAULT_VOCAB_SIZE, cache_dir="data/token-cache", tokenizer=None):
     manifest_path = Path(path).resolve()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if tokenizer is None and manifest.get("tokenizer"):
@@ -283,7 +283,7 @@ def main():
     parser.add_argument("--vocab-size", type=int, default=None)
     parser.add_argument("--attention", choices=["mha", "mla"], default=None)
     parser.add_argument("--kv-rank", type=int, default=None, help="MLA latent width; 0 selects half model width")
-    parser.add_argument("--out", help="Output checkpoint (default: books-100m-16l.raw.pt)")
+    parser.add_argument("--out", help="Output checkpoint (default: books-200m-16l-16k.raw.pt)")
     parser.add_argument("--steps", type=int, default=20000)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--grad-accum-steps", type=int, default=4,
@@ -310,7 +310,7 @@ def main():
     if not math.isfinite(args.max_qa_passes) or args.max_qa_passes <= 0:
         parser.error("max-qa-passes must be positive and finite")
     model, tokenizer = load_model(args.init_from) if args.init_from else (None, None)
-    defaults = dict(vocab_size=8192, attention="mla", kv_rank=0, context_size=512,
+    defaults = dict(vocab_size=DEFAULT_VOCAB_SIZE, attention="mla", kv_rank=0, context_size=512,
                     n_layers=16, n_heads=4, n_embd=384, dropout=0.0)
     for key, default in defaults.items():
         value = getattr(model.config, key) if model is not None else default
@@ -326,8 +326,8 @@ def main():
             parser.error("data-mixture cannot be combined with data/validation-data")
     if args.token_cache_dir and not args.validation_data and not args.data_mixture:
         parser.error("token-cache-dir requires validation-data or data-mixture")
-    args.out = args.out or ("checkpoints/books-100m-16l.tuned.pt" if instructing else
-                            "checkpoints/books-100m-16l.raw.pt")
+    args.out = args.out or ("checkpoints/books-200m-16l-16k.tuned.pt" if instructing else
+                            "checkpoints/books-200m-16l-16k.raw.pt")
     if (min(args.steps, args.batch_size, args.grad_accum_steps, args.eval_every, args.eval_batches) < 1
             or not math.isfinite(args.lr) or args.lr <= 0):
         parser.error("steps, batch-size, grad-accum-steps, eval-every, eval-batches, and lr must be positive")

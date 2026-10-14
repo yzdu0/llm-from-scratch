@@ -1,5 +1,8 @@
 """Pretrain a raw MLA checkpoint, then save a separate Q&A-tuned checkpoint."""
 import argparse
+import json
+from .prepare import DEFAULT_TRAIN_TOKENS, FICTION_SHARE, EDUCATION_SHARE
+from .tokenizer import DEFAULT_VOCAB_SIZE, BPETokenizer
 from pathlib import Path
 import shutil
 import subprocess
@@ -13,10 +16,10 @@ def run(arguments):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--name', default='books-100m-16l')
+    parser.add_argument('--name', default='books-200m-16l-16k')
     parser.add_argument('--data-dir', default='data')
     parser.add_argument('--checkpoint-dir', default='checkpoints')
-    parser.add_argument('--pretrain-steps', type=int, default=20000)
+    parser.add_argument('--pretrain-steps', type=int, default=24000)
     parser.add_argument('--qa-steps', type=int, default=500)
     parser.add_argument('--device', default='auto', choices=['auto','cpu','mps','cuda'])
     parser.add_argument('--raw-checkpoint', help='Skip pretraining; copy this raw checkpoint and fine-tune it')
@@ -34,7 +37,15 @@ def main():
     if not args.raw_checkpoint:
         ready.extend([data/'expanded.json',data/'expanded-tokenizer.json',data/'expanded-fiction.txt',data/'expanded-education.txt',
                       data/'expanded-fiction-valid.txt',data/'expanded-education-valid.txt'])
-    if args.prepare or not all(p.exists() for p in ready):
+    data_ready = all(p.exists() for p in ready)
+    if data_ready and not args.raw_checkpoint:
+        data_ready = BPETokenizer.from_json((data/'expanded-tokenizer.json').read_text()).vocab_size == DEFAULT_VOCAB_SIZE
+        if data_ready:
+            manifest = json.loads((data/'expanded.json').read_text())
+            weights = {s['name']: s['weight'] for s in manifest.get('sources', [])}
+            data_ready = (manifest.get('target_tokens') == DEFAULT_TRAIN_TOKENS
+                          and weights == {'fiction': FICTION_SHARE, 'education': EDUCATION_SHARE})
+    if args.prepare or not data_ready:
         run(['-m','llm.prepare','--data-dir',str(data),'--only','qa' if args.raw_checkpoint else 'both'])
     common = ['--device',args.device,'--batch-size','4','--grad-accum-steps','4']
     if args.raw_checkpoint:
@@ -46,7 +57,7 @@ def main():
         parent = raw
     else:
         run(['-m','llm.train','--data-mixture',str(data/'expanded.json'),'--token-cache-dir',str(data/'token-cache'),
-             '--out',str(raw),'--attention','mla','--n-layers','16','--n-embd','384',
+             '--out',str(raw),'--vocab-size',str(DEFAULT_VOCAB_SIZE),'--attention','mla','--n-layers','16','--n-embd','384',
              '--context-size','512','--sampling','shuffled',
              '--steps',str(args.pretrain_steps),'--eval-every','200','--eval-batches','20',*common])
         parent = best_raw

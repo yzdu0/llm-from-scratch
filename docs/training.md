@@ -1,7 +1,7 @@
 # Training
 
 ```sh
-python -m llm.pipeline --name books-100m-16l
+python -m llm.pipeline --name books-200m-16l-16k
 ```
 
 The pipeline prepares missing data, pretrains a raw MLA model, then fine-tunes its
@@ -12,8 +12,8 @@ best validation checkpoint on Q&A. Outputs are:
 
 Pretraining uses 16 layers, width 384, context 512, batch size 4,
 and four gradient-accumulation steps,
-learning rate `3e-4`, weight decay `0.1`, and 20,000 updates. Warmup and cosine
-decay control the learning rate. The 163,840,000-token budget is about 1.64 passes
+learning rate `3e-4`, weight decay `0.1`, and 24,000 updates. Warmup and cosine
+decay control the learning rate. The 196,608,000-token budget is about 0.98 passes
 through each source. Shuffled, non-overlapping windows avoid repeating positions
 within a source epoch; fragments shorter than a window are omitted. The pipeline completes the full pretraining step budget.
 
@@ -27,7 +27,7 @@ To fine-tune an MLA checkpoint and save a raw copy alongside the tuned model:
 
 ```sh
 python -m llm.pipeline --name custom-qa \
-  --raw-checkpoint checkpoints/books-100m-16l.raw.best.pt
+  --raw-checkpoint checkpoints/books-200m-16l-16k.raw.best.pt
 ```
 
 `llm.train --init-from` inherits weights, architecture and tokenizer, with a fresh

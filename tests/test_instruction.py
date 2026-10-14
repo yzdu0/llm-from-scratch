@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import torch
@@ -12,7 +13,7 @@ from llm.checkpoint import load_model
 from llm.generate import main as generate_main
 from llm.instruction import InstructionData,instruction_prompt,load_instruction_data
 from llm.model import LanguageModel,ModelConfig
-from llm.tokenizer import BPETokenizer,EOS_TOKEN
+from llm.tokenizer import BPETokenizer,EOS_TOKEN,DEFAULT_VOCAB_SIZE
 from llm.train import ShuffledWindows,load_cached_files,main as train_main,save_checkpoint
 from llm.pipeline import main as pipeline_main
 from llm.prepare import fiction_candidates,qa_record,trim_training_pool,token_count,educational_text
@@ -92,11 +93,12 @@ class InstructionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder)
             for name in ['expanded.json','expanded-tokenizer.json','expanded-fiction.txt','expanded-education.txt','expanded-fiction-valid.txt','expanded-education-valid.txt','instruction.jsonl','instruction-valid.jsonl']:(root/name).touch()
-            with patch('sys.argv',['pipeline','--data-dir',folder,'--checkpoint-dir',folder]),patch('llm.pipeline.run') as runner,patch('sys.stdout',new_callable=io.StringIO):
+            (root/'expanded.json').write_text('{"target_tokens": 200000000, "sources": [{"name": "fiction", "weight": 0.7}, {"name": "education", "weight": 0.3}]}')
+            with patch('sys.argv',['pipeline','--data-dir',folder,'--checkpoint-dir',folder]),patch('llm.pipeline.run') as runner,patch('llm.pipeline.BPETokenizer.from_json',return_value=SimpleNamespace(vocab_size=DEFAULT_VOCAB_SIZE)),patch('sys.stdout',new_callable=io.StringIO):
                 pipeline_main()
             self.assertEqual(runner.call_count,2)
             pretrain,qa=[c.args[0] for c in runner.call_args_list]
-            for flag,value in [('--n-layers','16'),('--n-embd','384'),('--steps','20000')]:
+            for flag,value in [('--n-layers','16'),('--n-embd','384'),('--vocab-size','16384'),('--steps','24000')]:
                 self.assertEqual(pretrain[pretrain.index(flag)+1],value)
             self.assertNotIn('--patience',pretrain)
             self.assertNotIn('--n-layers',qa);self.assertNotIn('--n-embd',qa)
@@ -106,10 +108,31 @@ class InstructionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder)
             for name in ['expanded.json','expanded-tokenizer.json','expanded-fiction.txt','expanded-education.txt','expanded-fiction-valid.txt','expanded-education-valid.txt','instruction.jsonl','instruction-valid.jsonl']:(root/name).touch()
-            with patch('sys.argv',['pipeline','--data-dir',folder,'--checkpoint-dir',folder]),patch('llm.pipeline.run',side_effect=subprocess.CalledProcessError(1,'train')) as runner:
+            (root/'expanded.json').write_text('{"target_tokens": 200000000, "sources": [{"name": "fiction", "weight": 0.7}, {"name": "education", "weight": 0.3}]}')
+            with patch('sys.argv',['pipeline','--data-dir',folder,'--checkpoint-dir',folder]),patch('llm.pipeline.run',side_effect=subprocess.CalledProcessError(1,'train')) as runner,patch('llm.pipeline.BPETokenizer.from_json',return_value=SimpleNamespace(vocab_size=DEFAULT_VOCAB_SIZE)):
                 with self.assertRaises(subprocess.CalledProcessError):pipeline_main()
             self.assertEqual(runner.call_count,1)
             self.assertEqual(runner.call_args.args[0][:2],['-m','llm.train'])
+
+    def test_pipeline_rebuilds_a_stale_vocabulary(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            for name in ['expanded.json','expanded-tokenizer.json','expanded-fiction.txt','expanded-education.txt','expanded-fiction-valid.txt','expanded-education-valid.txt','instruction.jsonl','instruction-valid.jsonl']:(root/name).touch()
+            (root/'expanded.json').write_text('{"target_tokens": 200000000, "sources": [{"name": "fiction", "weight": 0.7}, {"name": "education", "weight": 0.3}]}')
+            with patch('sys.argv',['pipeline','--data-dir',folder,'--checkpoint-dir',folder]),patch('llm.pipeline.run') as runner,patch('llm.pipeline.BPETokenizer.from_json',return_value=SimpleNamespace(vocab_size=8192)),patch('sys.stdout',new_callable=io.StringIO):
+                pipeline_main()
+            self.assertEqual(runner.call_count,3)
+            self.assertEqual(runner.call_args_list[0].args[0][:2],['-m','llm.prepare'])
+
+    def test_pipeline_rebuilds_an_undersized_pool(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            for name in ['expanded.json','expanded-tokenizer.json','expanded-fiction.txt','expanded-education.txt','expanded-fiction-valid.txt','expanded-education-valid.txt','instruction.jsonl','instruction-valid.jsonl']:(root/name).touch()
+            (root/'expanded.json').write_text('{"target_tokens": 100000000}')
+            with patch('sys.argv',['pipeline','--data-dir',folder,'--checkpoint-dir',folder]),patch('llm.pipeline.run') as runner,patch('llm.pipeline.BPETokenizer.from_json',return_value=SimpleNamespace(vocab_size=DEFAULT_VOCAB_SIZE)),patch('sys.stdout',new_callable=io.StringIO):
+                pipeline_main()
+            self.assertEqual(runner.call_count,3)
+            self.assertEqual(runner.call_args_list[0].args[0][:2],['-m','llm.prepare'])
 
     def test_raw_checkpoint_pipeline_writes_distinct_models(self):
         with tempfile.TemporaryDirectory() as folder:
